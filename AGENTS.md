@@ -44,6 +44,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 |---|---|---|
 | `CCFIND_PROFILES` | unset | `label:configdir` pairs → search multiple local profiles (env or `.env`) |
 | `CCFIND_HOSTS` | unset | ssh aliases for `-r`/`ccfindr` (env or `.env`) |
+| `CCFIND_REMOTE_RESUME` | unset | override remote resume: called `<cmd> <host> <cwd> <id>` (wrap in tmux/screen) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
 | `CCFIND_INTERACTIVE` | 1 | `0` → default to flat list |

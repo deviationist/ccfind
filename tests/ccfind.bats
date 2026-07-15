@@ -111,3 +111,21 @@ setup() { ccfind_setup; }
   # 3 sessions match but only 2 are shown, with a truncation footer.
   [[ "$output" == *"3 total"* ]]
 }
+
+@test "remote (stubbed ssh): host column + default ssh resume command" {
+  install_ssh_stub
+  run_ccfind -H fakehost -N anything
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fakehost:/remote/proj"* ]]
+  [[ "$output" == *"ssh -t fakehost"* ]]
+}
+
+@test "CCFIND_REMOTE_RESUME overrides the remote resume command" {
+  install_ssh_stub
+  export CCFIND_REMOTE_RESUME="my-resume"
+  run_ccfind -H fakehost -N anything
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fakehost:/remote/proj"* ]]
+  [[ "$output" == *"my-resume fakehost /remote/proj RID123"* ]]
+  [[ "$output" != *"ssh -t fakehost"* ]]
+}
