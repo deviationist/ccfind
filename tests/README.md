@@ -20,8 +20,8 @@ Every test is hermetic:
 - A fixture `HOME` is used, so the default profile is `$FIXHOME/.claude` — the
   real `~/.claude` is never read.
 - `ccfind.zsh` is copied into the tmpdir before sourcing, so the auto-loaded
-  `.env` (`${_CCFIND_SOURCE:h}/.env`) resolves to a dir with none — the operator's
-  real `~/code-private/ccfind/.env` is never sourced. Config comes only from
+  `.env` (`${_CCFIND_SOURCE:h}/.env`) resolves to a dir with none — your real
+  `.env` beside `ccfind.zsh` is never sourced. Config comes only from
   exported `CCFIND_*` vars each test sets.
 - `CCFIND_INTERACTIVE=0` forces the flat-list path, so tests need no fzf/TTY.
 
