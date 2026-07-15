@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid re-pushes to a PR).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run both OSes to completion — ccfind leans on coreutils that differ
+      # between BSD (macOS) and GNU (Linux): stat, ls -t, find, grep, sed. This
+      # matrix is exactly what catches that drift.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats + zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bats zsh
+
+      - name: Install bats (macOS)
+        # zsh ships with macOS; git comes from the runner.
+        if: runner.os == 'macOS'
+        run: brew install bats-core
+
+      - name: Tool versions
+        run: |
+          zsh --version
+          bats --version
+          git --version
+
+      - name: Run test suite
+        run: ./tests/run.sh
