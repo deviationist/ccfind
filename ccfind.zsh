@@ -159,6 +159,9 @@ function _ccfind_tab_shift() {
 # an interactive shell, so PATH + any `claude` wrapper apply), and the
 # → preview fetches the remote transcript on demand.
 # Without -r/-H (the default) the search is purely local.
+# Remote resume is overridable: set CCFIND_REMOTE_RESUME to a command/function and
+# ccfind calls `<cmd> <host> <cwd> <session-id>` instead of its built-in ssh — e.g.
+# to attach the session inside tmux/screen so it survives a dropped connection.
 # Bonus (multi-host + picker only): CCFIND_TABS=1 adds per-host tab views —
 # Tab/Shift-Tab cycle All → local → <host>, shown as a bar in the header
 # (needs fzf ≥ 0.45; silently ignored below that).
@@ -200,15 +203,16 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME=""
       source "$_envf"
-      [[ -z "$_cfg_profiles" ]] && _cfg_profiles="$CCFIND_PROFILES"
-      [[ -z "$_cfg_hosts" ]]    && _cfg_hosts="$CCFIND_HOSTS"
-      [[ -z "$_cfg_tabs" ]]     && _cfg_tabs="$CCFIND_TABS"
+      [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
+      [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
+      [[ -z "$_cfg_tabs" ]]          && _cfg_tabs="$CCFIND_TABS"
+      [[ -z "$_cfg_remote_resume" ]] && _cfg_remote_resume="$CCFIND_REMOTE_RESUME"
     fi
   fi
 
@@ -566,8 +570,12 @@ RSEOF
 
     _ccfind_parse_row "$selected"
     if [[ -z "${prof_cfgdir[$_host]+x}" ]]; then   # remote hit (host not a local profile)
-      _ccfind_remote_cmd "$_cwd" "$_id"
-      ssh -t "$_host" "$_rcmd"
+      if [[ -n "$_cfg_remote_resume" ]]; then       # user override: fn <host> <cwd> <id>
+        ${(z)_cfg_remote_resume} "$_host" "$_cwd" "$_id"
+      else
+        _ccfind_remote_cmd "$_cwd" "$_id"
+        ssh -t "$_host" "$_rcmd"
+      fi
       return $?
     fi
     if [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
@@ -592,8 +600,12 @@ RSEOF
     _ccfind_parse_row "$_r"
     if [[ -z "${prof_cfgdir[$_host]+x}" ]]; then          # remote hit
       printf '\033[1m%s\033[0m  %s:%s\n' "$_ts" "$_host" "${_cwd:-?}"
-      _ccfind_remote_cmd "$_cwd" "$_id"
-      resume="ssh -t $_host ${(qq)_rcmd}"
+      if [[ -n "$_cfg_remote_resume" ]]; then
+        resume="$_cfg_remote_resume ${(q)_host} ${(q)_cwd} ${(q)_id}"
+      else
+        _ccfind_remote_cmd "$_cwd" "$_id"
+        resume="ssh -t $_host ${(qq)_rcmd}"
+      fi
     else                                                   # local hit
       if (( profiles_on )); then
         printf '\033[1m%s\033[0m  %s:%s\n' "$_ts" "$_host" "${_cwd:-?}"

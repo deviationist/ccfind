@@ -148,6 +148,35 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
   *locally* and matched as-is on each host — useful when the path exists on the
   hosts, a no-op filter otherwise.
 
+### Custom remote resume (tmux, screen, mosh, …)
+
+By default, resuming a remote hit runs
+`ssh -t <host> 'cd <cwd> && exec "$SHELL" -ic claude --resume <id>'`. Set
+`CCFIND_REMOTE_RESUME` to your own command or function and ccfind calls it as
+
+```
+<CCFIND_REMOTE_RESUME> <host> <cwd> <session-id>
+```
+
+instead — you own the connection. The common use is to land the remote session
+inside a persistent multiplexer so a dropped link doesn't kill it. For example, a
+function that ssh's in and attaches-or-creates a per-session tmux:
+
+```zsh
+# in ~/.zshrc (or a sourced file); then set CCFIND_REMOTE_RESUME=claude-ssh-tmux
+claude-ssh-tmux() {
+  local host=$1 cwd=$2 id=$3
+  # tmux new-session -A attaches an existing session or creates it — so
+  # reconnecting and resuming the same id re-attaches the live session.
+  ssh -t "$host" tmux new-session -A -s "ccfind-$id" \
+    "cd ${(q)cwd} && exec claude --resume $id"
+}
+```
+
+ccfind stays agnostic — it knows nothing about tmux/screen, it just calls your
+hook. The flat list prints the same `<cmd> <host> <cwd> <id>` invocation, so it's
+copy/paste-able too.
+
 ### Per-host tab views (`CCFIND_TABS=1`)
 
 fzf has no native tab widget, so this emulates one: with `CCFIND_TABS=1` set (env or
@@ -178,6 +207,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 |---|---|---|
 | `CCFIND_PROFILES` | *(unset)* | Space/comma-separated `label:configdir` pairs → search multiple local Claude profiles. Unset = just `~/.claude`. |
 | `CCFIND_HOSTS` | *(unset)* | Space/comma-separated ssh aliases for `-r`/`ccfindr`. Env or `.env`. |
+| `CCFIND_REMOTE_RESUME` | *(unset)* | Command/function to resume a remote hit: called as `<cmd> <host> <cwd> <id>` instead of the built-in ssh (wrap in tmux/screen, etc.). |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |

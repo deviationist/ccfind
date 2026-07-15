@@ -38,3 +38,18 @@ mk_session() {
 run_ccfind() {
   run env HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' _ "$CCFIND_ZSH" "$@"
 }
+
+# install_ssh_stub — shadow `ssh` with a stub that emulates ccfind's remote
+# worker (one TSV hit regardless of args), so the remote (-r/-H) code path is
+# exercisable without a real host. ccfind calls `command ssh`, which honors PATH.
+install_ssh_stub() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/ssh" <<'STUB'
+#!/usr/bin/env bash
+# worker output: epoch \t id \t cwd \t ts \t snippet \t path
+printf '1700000000\tRID123\t/remote/proj\t2024-01-01 12:00:00\tremote snippet\t/remote/proj/RID123.jsonl\n'
+exit 0
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
