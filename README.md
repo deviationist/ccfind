@@ -42,6 +42,8 @@ ccfind -r <text...>                # also search the configured remote hosts (CC
 ccfindr <text...>                  # alias for `ccfind -r` (define in ~/.zshrc)
 ccfind -H "host-a host-b" <text...># search these ssh hosts (implies remote, overrides CCFIND_HOSTS)
 ccfind -l <text...>                # force local only (trumps -r / -H)
+ccfind <profile> <text...>         # scope local search to one CCFIND_PROFILES profile
+ccfind -p <profile> <text...>      # same, explicit form
 ```
 
 ### Interactive picker (default)
@@ -75,6 +77,35 @@ ccfind -n 50 deploy              # show up to 50 hits (same as CCFIND_MAX=50)
 ccfind -N deploy                 # flat-list output, copy/paste the resume command
 ccfind deploy | less             # auto-flat-list (no TTY on stdout)
 ```
+
+## Multi-profile search (opt-in)
+
+If you run Claude Code under more than one config dir — e.g. separate work and
+personal accounts (`CLAUDE_CONFIG_DIR`) — point `CCFIND_PROFILES` at them and
+`ccfind` searches all of them at once, tagging each hit with its profile:
+
+```zsh
+# .env beside ccfind.zsh  (or export from ~/.zshrc)
+typeset CCFIND_PROFILES="work:$HOME/.claude personal:$HOME/.claude-personal"
+```
+
+Format: space/comma-separated `label:configdir` pairs, where `<configdir>` is the
+Claude config dir (the one containing a `projects/` subdir). Order sets the tab
+order. Unset → a single `~/.claude` profile, exactly the previous behavior.
+
+- **Union by default.** `ccfind foo` searches every configured profile; hits show a
+  `work:` / `personal:` column (picker) or prefix (flat list).
+- **Scope to one:** a leading label — `ccfind work foo` — or the explicit
+  `-p work foo` restricts the local search to that profile. (Flags come before the
+  label: `ccfind -N -n 20 work foo`.) The positional form only fires when the first
+  word exactly matches a configured label, so ordinary searches are unaffected when
+  multi-profile is off.
+- **Correct resume.** Resuming a hit runs it under its own profile
+  (`CLAUDE_CONFIG_DIR=<that dir> claude --resume <id>`), so a personal session
+  reopens on the personal account regardless of where you launched `ccfind`.
+- **Profiles + hosts compose.** With both `CCFIND_PROFILES` and `CCFIND_HOSTS` set,
+  `ccfindr foo` searches every local profile *and* every remote host; tabs become
+  `All │ work │ personal │ <host>…`.
 
 ## Multi-host search (opt-in per call)
 
@@ -120,9 +151,9 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
 ### Per-host tab views (`CCFIND_TABS=1`)
 
 fzf has no native tab widget, so this emulates one: with `CCFIND_TABS=1` set (env or
-`.env`, next to `CCFIND_HOSTS`), the multi-host picker grows a tab bar in the header
-— `All │ local │ host-a │ host-b` — and `Tab` / `Shift-Tab` cycle the views (current
-tab inverse-video, `All` first, hosts with zero hits omitted). Each host tab shows
+`.env`, next to `CCFIND_HOSTS`), the multi-host/multi-profile picker grows a tab bar
+in the header — e.g. `All │ work │ personal │ host-a` — and `Tab` / `Shift-Tab` cycle
+the views (current tab inverse-video, `All` first, empty views omitted). Each tab shows
 **that host's own newest hits, up to `-n <max>`** — so a host whose sessions are all
 older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (Jan
 2024); older fzf silently gets the plain merged list. No effect on the flat list,
@@ -145,6 +176,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `CCFIND_PROFILES` | *(unset)* | Space/comma-separated `label:configdir` pairs → search multiple local Claude profiles. Unset = just `~/.claude`. |
 | `CCFIND_HOSTS` | *(unset)* | Space/comma-separated ssh aliases for `-r`/`ccfindr`. Env or `.env`. |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |

@@ -17,6 +17,8 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -r           also search CCFIND_HOSTS over ssh   (alias: ccfindr = ccfind -r)
   -H "<hosts>" search an explicit ssh-alias list (implies remote)
   -l           force local only (trumps -r / -H)
+  -p <label>   scope local search to one CCFIND_PROFILES profile
+  <label> ...  positional shorthand for -p (e.g. `ccfind work foo`; flags first)
 ```
 
 - **Picker (default when `fzf` + TTY):** Enter cds to the session's cwd and runs
@@ -28,14 +30,19 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   merge newest-first with a host column; resume becomes `ssh -t <host> 'cd <cwd> &&
   exec "$SHELL" -ic claude --resume <id>'`. Host precedence: `-H` > env `CCFIND_HOSTS`
   > `.env`. Unreachable host = one stderr line, rest still show.
-- **Tab views (`CCFIND_TABS=1`, multi-host picker, fzf ≥ 0.45):** header bar
-  `All │ local │ <host>…`, Tab/Shift-Tab cycle; each host tab shows that host's own
-  newest hits. Silently off below fzf 0.45.
+- **Multi-profile (`CCFIND_PROFILES="label:configdir ..."`):** unions several local
+  Claude config dirs, tags each hit with its label. `ccfind foo` = all profiles;
+  `ccfind <label> foo` / `-p <label>` = one. Resume runs under that profile
+  (`CLAUDE_CONFIG_DIR=<dir> claude --resume`). Unset → single `~/.claude` (unchanged).
+- **Tab views (`CCFIND_TABS=1`, multi-host/multi-profile picker, fzf ≥ 0.45):** header
+  bar `All │ <profile> │ <host>…`, Tab/Shift-Tab cycle; each tab shows its own newest
+  hits. Silently off below fzf 0.45.
 
 ## Env vars
 
 | Var | Default | Purpose |
 |---|---|---|
+| `CCFIND_PROFILES` | unset | `label:configdir` pairs → search multiple local profiles (env or `.env`) |
 | `CCFIND_HOSTS` | unset | ssh aliases for `-r`/`ccfindr` (env or `.env`) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
