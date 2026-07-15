@@ -14,7 +14,10 @@ function _ccfind_preview() {
   local host="$1" f="$2"
   if [[ -z "$f" ]]; then f="$host"; host="local"; fi
   local label="$f"
-  if [[ -n "$host" && "$host" != "local" ]]; then
+  # Local if the host tag is "local" or one of the configured profile labels
+  # (passed in via CCFIND_LOCAL_LABELS); otherwise it's a remote host to ssh to.
+  local -a _locals=(local ${(s: :)CCFIND_LOCAL_LABELS})
+  if [[ -n "$host" && ${_locals[(Ie)$host]} -eq 0 ]]; then
     label="$host:$f"
     local cdir="${CCFIND_PV_CACHE:-${TMPDIR:-/tmp}}"
     local cache="$cdir/ccfind-pv-${host//\//_}-${f:t}"
@@ -143,6 +146,9 @@ function _ccfind_tab_shift() {
 #   ccfind -l <text...>         force local only (trumps -r / -H)
 #   ccfind -H "host-a host-b" ... search these ssh hosts (implies remote,
 #                               overrides CCFIND_HOSTS)
+#   ccfind <profile> <text...>  scope the LOCAL search to one CCFIND_PROFILES
+#   ccfind -p <profile> <text>  profile (e.g. `ccfind work foo`); omit it to
+#                               search every configured profile at once
 #
 # Multi-host search (opt-in per call): set CCFIND_HOSTS to a space/comma-
 # separated list of ssh aliases (exported, or in the .env beside this file), then pass
@@ -165,11 +171,10 @@ function _ccfind_tab_shift() {
 function ccfind() {
   emulate -L zsh   # consistent zsh defaults (glob qualifiers) regardless of caller
   setopt local_options no_notify no_monitor   # silent background ssh fan-out
-  local root="${HOME}/.claude/projects"
   local max="${CCFIND_MAX:-10}"
   local scope=""
   local interactive="${CCFIND_INTERACTIVE:-1}"
-  local hosts_override="" local_only=0 remote=0
+  local hosts_override="" local_only=0 remote=0 prof_filter=""
 
   while [[ "$1" == -* ]]; do
     case "$1" in
@@ -180,46 +185,94 @@ function ccfind() {
       -r|--remote) remote=1; shift ;;
       -l|--local) local_only=1; shift ;;
       -H|--hosts) hosts_override="$2"; shift 2 ;;
+      -p|--profile) prof_filter="$2"; shift 2 ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-n <max-hits>] [-i|-N] [-r|-l] [-H <hosts>] [search text...]"
+        echo "usage: ccfind [-d <dir>] [-n <max>] [-i|-N] [-r|-l] [-H <hosts>] [-p <profile>] [<profile>] [text...]"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
+        echo "  multi-profile (CCFIND_PROFILES): -p <label>, or a leading <label> arg, scopes to one profile"
         return 0 ;;
       --) shift; break ;;
       *) echo "ccfind: unknown option $1" >&2; return 2 ;;
     esac
   done
-  local query="$*"
 
-  # Remote hosts — opt-in per call: -H names an explicit list; -r pulls in
-  # the configured CCFIND_HOSTS (exported env > the .env beside this file); neither → local
-  # only, whatever is configured. -l trumps both. .env is sourced inside this
-  # function scope with its keys pre-declared local, so its typeset values stay
-  # function-local.
-  local hosts_raw="" tabs_cfg="${CCFIND_TABS-}"
+  # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
+  # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
+  # are pre-declared local before sourcing so nothing leaks to the shell.
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" ]]; then
+    local _envf="${_CCFIND_SOURCE:h}/.env"
+    if [[ -r "$_envf" ]]; then
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS=""
+      source "$_envf"
+      [[ -z "$_cfg_profiles" ]] && _cfg_profiles="$CCFIND_PROFILES"
+      [[ -z "$_cfg_hosts" ]]    && _cfg_hosts="$CCFIND_HOSTS"
+      [[ -z "$_cfg_tabs" ]]     && _cfg_tabs="$CCFIND_TABS"
+    fi
+  fi
+
+  # ---- Local search profiles. Opt-in via CCFIND_PROFILES ("label:dir ..."):
+  # each token maps a display label to a Claude config dir; the search covers
+  # <dir>/projects for every configured profile that exists. Unset/none present
+  # → a single "local" profile at ~/.claude, byte-identical to prior behavior.
+  local -a prof_labels prof_roots
+  local -A prof_cfgdir
+  local profiles_on=0
+  if [[ -n "$_cfg_profiles" ]]; then
+    local _tok _lbl _dir
+    for _tok in ${(s: :)${_cfg_profiles//,/ }}; do
+      [[ "$_tok" == *:* ]] || continue
+      _lbl="${_tok%%:*}"; _dir="${_tok#*:}"
+      [[ -n "$_lbl" && -n "$_dir" ]] || continue
+      _dir="${_dir/#\~/$HOME}"                    # expand a leading ~
+      [[ -d "$_dir/projects" ]] || continue        # skip profiles not present here
+      prof_labels+=("$_lbl"); prof_roots+=("$_dir/projects"); prof_cfgdir[$_lbl]="$_dir"
+    done
+    (( ${#prof_labels} > 0 )) && profiles_on=1
+  fi
+  if (( ! profiles_on )); then
+    prof_labels=(local); prof_roots=("${HOME}/.claude/projects"); prof_cfgdir[local]="${HOME}/.claude"
+  fi
+
+  # ---- Positional profile selector: `ccfind <label> [text...]`. Only fires
+  # when profiles are configured AND the first word exactly matches a label
+  # (so plain searches are unaffected when multi-profile is off). The explicit
+  # -p <label> form is always available and unambiguous.
+  local -a _pos=("$@")
+  if [[ -z "$prof_filter" ]] && (( profiles_on )) && (( ${#_pos} > 0 )) \
+     && [[ -n "${prof_cfgdir[${_pos[1]}]+x}" ]]; then
+    prof_filter="${_pos[1]}"; _pos=("${_pos[@]:1}")
+  fi
+  local query="${_pos[*]}"
+
+  # A profile filter (from -p or the positional) narrows the local set to one.
+  if [[ -n "$prof_filter" ]]; then
+    if [[ -z "${prof_cfgdir[$prof_filter]+x}" ]]; then
+      echo "ccfind: unknown profile '$prof_filter' (configured: ${prof_labels[*]})" >&2
+      return 2
+    fi
+    prof_labels=("$prof_filter"); prof_roots=("${prof_cfgdir[$prof_filter]}/projects")
+  fi
+
+  # ---- Remote hosts — opt-in per call: -H names an explicit list; -r pulls in
+  # the configured CCFIND_HOSTS; neither → local only. -l trumps both.
+  local hosts_raw="" tabs_cfg="$_cfg_tabs"
   if (( ! local_only )); then
     if [[ -n "$hosts_override" ]]; then
       hosts_raw="$hosts_override"
     elif (( remote )); then
-      if [[ -n "${CCFIND_HOSTS-}" ]]; then
-        hosts_raw="$CCFIND_HOSTS"
-      else
-        local _envf="${_CCFIND_SOURCE:h}/.env"
-        if [[ -r "$_envf" ]]; then
-          typeset CCFIND_HOSTS="" CCFIND_TABS=""
-          source "$_envf"
-          hosts_raw="$CCFIND_HOSTS"
-          [[ -z "$tabs_cfg" ]] && tabs_cfg="$CCFIND_TABS"
-        fi
-      fi
+      hosts_raw="$_cfg_hosts"
       [[ -z "$hosts_raw" ]] && echo "ccfind: -r given but no CCFIND_HOSTS configured (env or the .env beside ccfind.zsh) — searching locally" >&2
     fi
   fi
   local -a remote_hosts
   remote_hosts=(${(s: :)${hosts_raw//,/ }})
 
-  if [[ ! -d "$root" && ${#remote_hosts} -eq 0 ]]; then
-    echo "❌ No Claude sessions directory at $root" >&2
+  local _any_local=0 _r0
+  for _r0 in "${prof_roots[@]}"; do [[ -d "$_r0" ]] && { _any_local=1; break; }; done
+  if (( ! _any_local && ${#remote_hosts} == 0 )); then
+    echo "❌ No Claude sessions directory found (looked in: ${prof_roots[*]})" >&2
     return 1
   fi
 
@@ -238,9 +291,11 @@ function ccfind() {
   # The worker script goes over stdin (`sh -s`) — nothing is installed on the
   # hosts, and only per-hit TSV metadata comes back, never transcript bodies.
   local rtmpdir=""
-  if (( ${#remote_hosts} > 0 )); then
+  if (( ${#remote_hosts} > 0 )) || [[ "$tabs_cfg" == "1" ]]; then
     rtmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ccfind.XXXXXX")" || return 1
     trap '[[ -n "$rtmpdir" ]] && rm -rf -- "$rtmpdir"' EXIT
+  fi
+  if (( ${#remote_hosts} > 0 )); then
     local _rscript
     _rscript="$(cat <<'RSEOF'
 # ccfind remote worker — runs on each CCFIND_HOSTS host via `ssh <host> sh -s`.
@@ -298,18 +353,6 @@ RSEOF
     done
   fi
 
-  # Which local project dirs to look in.
-  local -a projdirs
-  if [[ -n "$enc" ]]; then
-    projdirs=("$root/$enc"(N/) "$root/$enc"-*(N/))
-    if (( ${#projdirs} == 0 && ${#remote_hosts} == 0 )); then
-      echo "No sessions recorded under $abs"
-      return 0
-    fi
-  else
-    projdirs=("$root"/*(N/))
-  fi
-
   # mtime printers, portable across GNU (Linux) and BSD/macOS stat
   local _statfn _epochfn
   if stat -c %y "$HOME" >/dev/null 2>&1; then
@@ -318,27 +361,6 @@ RSEOF
   else
     _statfn() { stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$1"; }             # BSD
     _epochfn() { stat -f '%m' "$1"; }
-  fi
-
-  local -a hits all_jsonls
-  # Expand once with (N) so empty projdirs don't trip NOMATCH, and so we can
-  # guard the grep call: passing zero files makes grep read stdin and hang.
-  all_jsonls=($^projdirs/*.jsonl(N))
-  if [[ -n "$query" ]]; then
-    # -F: literal string, not a regex.  -l: filenames only.
-    if (( ${#all_jsonls} > 0 )); then
-      hits=("${(@f)$(grep -liF -- "$query" "${all_jsonls[@]}" 2>/dev/null)}")
-    fi
-  else
-    hits=("${all_jsonls[@]}")
-  fi
-  hits=(${hits:#})   # drop empty elements
-
-  # newest first; ls -t with an explicit list works on GNU and BSD alike
-  local -a files
-  if (( ${#hits} > 0 )); then
-    files=("${(@f)$(ls -t -- $hits 2>/dev/null)}")
-    files=(${files:#})
   fi
 
   # Per-hit field extractor (id, cwd, ts, snippet) — shared by both code
@@ -358,15 +380,49 @@ RSEOF
   }
 
   # Build merged records: epoch \t host \t id \t cwd \t ts \t snippet \t path.
-  # Local extraction is capped at max up front (same bound the display uses),
-  # remote workers cap at max per host — the merge re-sorts and caps again.
+  # For LOCAL hits the "host" column carries the PROFILE label (work / personal,
+  # or just "local" when unconfigured). Each profile is searched and capped at
+  # max independently; remote workers cap at max per host; the merge re-caps.
   local -a records
-  local -a lcapped
-  lcapped=("${files[@]:0:$max}")
-  for _f in "${lcapped[@]}"; do
-    _ccfind_extract "$_f"
-    records+=("$(_epochfn "$_f")"$'\t'"local"$'\t'"$_id"$'\t'"${_cwd:-?}"$'\t'"$_ts"$'\t'"${_snippet//$'\t'/ }"$'\t'"$_f")
+  local local_count=0 _projdir_total=0
+  local _pi _plabel _proot
+  for (( _pi = 1; _pi <= ${#prof_labels}; _pi++ )); do
+    _plabel="${prof_labels[$_pi]}"
+    _proot="${prof_roots[$_pi]}"
+    [[ -d "$_proot" ]] || continue
+    local -a projdirs
+    if [[ -n "$enc" ]]; then
+      projdirs=("$_proot/$enc"(N/) "$_proot/$enc"-*(N/))
+    else
+      projdirs=("$_proot"/*(N/))
+    fi
+    (( _projdir_total += ${#projdirs} ))
+    local -a pjsonls phits pfiles
+    # (N) so empty projdirs don't trip NOMATCH and grep is never handed 0 files.
+    pjsonls=($^projdirs/*.jsonl(N))
+    (( ${#pjsonls} == 0 )) && continue
+    if [[ -n "$query" ]]; then
+      phits=("${(@f)$(grep -liF -- "$query" "${pjsonls[@]}" 2>/dev/null)}")
+    else
+      phits=("${pjsonls[@]}")
+    fi
+    phits=(${phits:#})
+    (( ${#phits} == 0 )) && continue
+    # newest first; ls -t with an explicit list works on GNU and BSD alike
+    pfiles=("${(@f)$(ls -t -- $phits 2>/dev/null)}")
+    pfiles=(${pfiles:#})
+    (( local_count += ${#pfiles} ))
+    for _f in "${pfiles[@]:0:$max}"; do
+      _ccfind_extract "$_f"
+      records+=("$(_epochfn "$_f")"$'\t'"$_plabel"$'\t'"$_id"$'\t'"${_cwd:-?}"$'\t'"$_ts"$'\t'"${_snippet//$'\t'/ }"$'\t'"$_f")
+    done
   done
+
+  # A -d scope that matched no project dir in any profile (and no remote host).
+  if [[ -n "$enc" ]] && (( _projdir_total == 0 && ${#remote_hosts} == 0 )); then
+    echo "No sessions recorded under $abs"
+    return 0
+  fi
 
   local remote_count=0
   if (( ${#remote_hosts} > 0 )); then
@@ -396,9 +452,9 @@ RSEOF
   local -a merged
   merged=("${(@f)$(printf '%s\n' "${records[@]}" | sort -t$'\t' -k1,1rn)}")
   merged=(${merged:#})
-  local total=$(( ${#files} + remote_count ))
+  local total=$(( local_count + remote_count ))
   local truncated=0
-  (( ${#merged} > max )) && truncated=1
+  (( total > max )) && truncated=1
   # Rows for display/selection, epoch stripped:
   # host \t id \t cwd \t ts \t snippet \t path
   # rows_all keeps the full sorted list — it feeds the per-host tab views,
@@ -446,32 +502,35 @@ RSEOF
     # 5 = snippet; columns 2 (id) and 6 (filepath) stay hidden — 6 feeds the
     # preview command together with 1.
     local withnth='4,3,5' pvcache=''
+    if (( ${#remote_hosts} > 0 || ${#prof_labels} > 1 )); then
+      withnth='4,1,3,5'   # show the host/profile column
+    fi
     if (( ${#remote_hosts} > 0 )); then
-      withnth='4,1,3,5'
       pvcache="$rtmpdir/pv"
       mkdir -p -- "$pvcache"
     fi
 
-    # Optional per-host tab views (CCFIND_TABS=1): Tab/Shift-Tab cycle
-    # All → local → <each host with hits>, rendered as a bar in the header.
-    # Needs fzf ≥ 0.45 for the transform action; silently off below that.
+    # Optional tab views (CCFIND_TABS=1): Tab/Shift-Tab cycle
+    # All → <each profile> → <each host with hits>, rendered as a header bar.
+    # Enabled when there's more than one view to show (multiple local profiles
+    # and/or remote hosts). Needs fzf ≥ 0.45 for the transform action.
     local -a fzf_extra
-    if [[ "$tabs_cfg" == "1" ]] && (( ${#remote_hosts} > 0 )); then
+    if [[ "$tabs_cfg" == "1" && -n "$rtmpdir" ]] && (( ${#remote_hosts} > 0 || ${#prof_labels} > 1 )); then
       autoload -Uz is-at-least
       local _fzfv="${$(fzf --version 2>/dev/null)%% *}"
       if [[ -n "$_fzfv" ]] && is-at-least 0.45 "$_fzfv"; then
         local tabsdir="$rtmpdir/tabs"
         mkdir -p -- "$tabsdir"
-        # Views come from the *pre-cap* rows_all: a host tab shows that
-        # host's own newest hits (up to max) even when none of them made
-        # the globally-capped All view. Hosts with zero hits get no tab.
+        # Views come from the *pre-cap* rows_all: a tab shows that profile/host's
+        # own newest hits (up to max) even when none made the globally-capped All
+        # view. Profiles/hosts with zero hits get no tab.
         # NB: the match must land in an array variable first — a ${(M)...}
         # with $'\t' inside (( )) silently mismatches (zsh arith quoting).
         local -a views vrows
         views=(All)
         printf '%s\n' "${rows[@]}" >"$tabsdir/view-1.rows"
         local _v
-        for _v in local "${remote_hosts[@]}"; do
+        for _v in "${prof_labels[@]}" "${remote_hosts[@]}"; do
           vrows=(${(M)rows_all:#${_v}$'\t'*})
           (( ${#vrows} > 0 )) || continue
           views+=("$_v")
@@ -497,7 +556,7 @@ RSEOF
             --delimiter=$'\t' --with-nth=$withnth \
             --no-sort --ansi --reverse --height=80% \
             --header="$header" \
-            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {6}'" \
+            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {6}'" \
             --preview-window='hidden,right,60%,wrap' \
             --bind 'right:show-preview' \
             --bind 'left:hide-preview' \
@@ -506,7 +565,7 @@ RSEOF
     [[ -z "$selected" ]] && return 0   # Esc / no match
 
     _ccfind_parse_row "$selected"
-    if [[ "$_host" != "local" ]]; then
+    if [[ -z "${prof_cfgdir[$_host]+x}" ]]; then   # remote hit (host not a local profile)
       _ccfind_remote_cmd "$_cwd" "$_id"
       ssh -t "$_host" "$_rcmd"
       return $?
@@ -518,7 +577,11 @@ RSEOF
       fi
       cd "$_cwd" || { echo "ccfind: cd to $_cwd failed" >&2; return 1; }
     fi
-    claude --resume "$_id"
+    if (( profiles_on )); then
+      CLAUDE_CONFIG_DIR="${prof_cfgdir[$_host]}" claude --resume "$_id"
+    else
+      claude --resume "$_id"
+    fi
     return $?
   fi
 
@@ -527,20 +590,25 @@ RSEOF
   for _r in "${rows[@]}"; do
     (( shown > 0 )) && printf '\033[2m%s\033[0m\n' '──────────────────────────────────────────'
     _ccfind_parse_row "$_r"
-    if [[ "$_host" != "local" ]]; then
+    if [[ -z "${prof_cfgdir[$_host]+x}" ]]; then          # remote hit
       printf '\033[1m%s\033[0m  %s:%s\n' "$_ts" "$_host" "${_cwd:-?}"
-    else
-      printf '\033[1m%s\033[0m  %s\n' "$_ts" "${_cwd:-?}"
-    fi
-    [[ -n "$_snippet" ]] && printf '   \033[2m…%s…\033[0m\n' "$_snippet"
-    if [[ "$_host" != "local" ]]; then
       _ccfind_remote_cmd "$_cwd" "$_id"
       resume="ssh -t $_host ${(qq)_rcmd}"
-    elif [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
-      resume="cd ${(q)_cwd} && claude --resume $_id"
-    else
-      resume="claude --resume $_id"
+    else                                                   # local hit
+      if (( profiles_on )); then
+        printf '\033[1m%s\033[0m  %s:%s\n' "$_ts" "$_host" "${_cwd:-?}"
+      else
+        printf '\033[1m%s\033[0m  %s\n' "$_ts" "${_cwd:-?}"
+      fi
+      local _pfx=""
+      (( profiles_on )) && _pfx="CLAUDE_CONFIG_DIR=${(q)prof_cfgdir[$_host]} "
+      if [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
+        resume="cd ${(q)_cwd} && ${_pfx}claude --resume $_id"
+      else
+        resume="${_pfx}claude --resume $_id"
+      fi
     fi
+    [[ -n "$_snippet" ]] && printf '   \033[2m…%s…\033[0m\n' "$_snippet"
     printf '   %s\n' "$resume"
     (( shown++ ))
   done
