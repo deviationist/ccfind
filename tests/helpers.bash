@@ -4,8 +4,8 @@
 # ccfind.zsh is zsh-only (glob qualifiers, ${(s)}/${(@f)}/${(q)} flags, assoc
 # arrays), so — unlike a portable tool — we do NOT source it under bash. Each
 # test invokes ccfind inside an isolated `zsh -f` subprocess with a fixture HOME
-# and a copy of the script that has no sibling .env (so the operator's real
-# ~/code-private/ccfind/.env is never sourced). All state lives in
+# and a copy of the script that has no sibling .env (so your real .env beside
+# ccfind.zsh is never sourced). All state lives in
 # $BATS_TEST_TMPDIR, which bats creates and removes per test.
 
 ccfind_setup() {
