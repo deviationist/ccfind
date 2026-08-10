@@ -26,9 +26,23 @@ Every test is hermetic:
 - `CCFIND_INTERACTIVE=0` forces the flat-list path, so tests need no fzf/TTY.
 
 Coverage is the local search + profile logic (union, positional/`-p` scoping,
-profile-aware resume, `-d` scoping, caps, error paths). The fzf picker, remote
-(`-r`/ssh) fan-out, and preview pane are interactive/network paths left to manual
-verification.
+profile-aware resume, `-d` scoping, caps, error paths). The fzf picker and the
+preview pane are interactive paths left to manual verification; the remote
+(`-r`/ssh) fan-out is covered against a stubbed `ssh`.
+
+## The resume line as a contract
+
+ccfind's real output is a *command*, and in practice it is handed to
+claude-profile's `claude` wrapper, which honors a caller-set `CLAUDE_CONFIG_DIR`
+verbatim. So the last group of tests does not just string-match the printed line
+— it **executes** it against a stub `claude` (`install_claude_stub`) and asserts
+where it actually landed: the right config dir per profile, no dir at all when
+profiles are unconfigured, the assignment bound to `claude` rather than to the
+preceding `cd`, and a cwd containing spaces still quoted into one argument.
+
+Note `unset CLAUDE_CONFIG_DIR` in `ccfind_setup`: anything running this suite
+from inside a Claude Code session has it exported, and an executed resume line
+would inherit it and mask what ccfind actually emitted.
 
 `mk_session <config-dir> <cwd> <id> <text>` writes a transcript fixture at
 `<config-dir>/projects/<encoded-cwd>/<id>.jsonl`.
