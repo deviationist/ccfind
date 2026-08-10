@@ -129,3 +129,98 @@ setup() { ccfind_setup; }
   [[ "$output" == *"my-resume fakehost /remote/proj RID123"* ]]
   [[ "$output" != *"ssh -t fakehost"* ]]
 }
+
+# --- the resume line as a contract ----------------------------------------
+# ccfind hands off to `claude` (in practice, to claude-profile's wrapper, which
+# honors a caller-set CLAUDE_CONFIG_DIR verbatim). These pin that the emitted
+# line is not merely well-worded but actually executes into the right seat.
+
+@test "multi-profile: the emitted resume line really launches into that profile's dir" {
+  mkdir -p "$BATS_TEST_TMPDIR/work/projects" "$BATS_TEST_TMPDIR/proj"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/proj" p1 "term"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -N personal term
+  [ "$status" -eq 0 ]
+  local line; line="$(resume_line_from_output)"
+  install_claude_stub
+  run_resume "$line"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"argv=[--resume p1]"* ]]
+  [[ "$output" == *"dir=[$BATS_TEST_TMPDIR/personal]"* ]]
+  [[ "$output" == *"pwd=[$BATS_TEST_TMPDIR/proj]"* ]]
+}
+
+@test "unconfigured: the resume line launches with no CLAUDE_CONFIG_DIR set" {
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
+  run_ccfind -N term
+  local line; line="$(resume_line_from_output)"
+  install_claude_stub
+  run_resume "$line"
+  [[ "$output" == *"dir=[<unset>]"* ]]
+}
+
+@test "the env assignment binds to claude, not to the cd that precedes it" {
+  mkdir -p "$BATS_TEST_TMPDIR/work/projects" "$BATS_TEST_TMPDIR/proj"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/proj" p1 "term"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -N personal term
+  [[ "$output" == *"cd $BATS_TEST_TMPDIR/proj && CLAUDE_CONFIG_DIR=$BATS_TEST_TMPDIR/personal claude --resume p1"* ]]
+}
+
+@test "a session cwd containing spaces is quoted, so the line stays executable" {
+  mkdir -p "$BATS_TEST_TMPDIR/work/projects" "$BATS_TEST_TMPDIR/my proj"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/my proj" p1 "term"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -N personal term
+  local line; line="$(resume_line_from_output)"
+  install_claude_stub
+  run_resume "$line"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pwd=[$BATS_TEST_TMPDIR/my proj]"* ]]
+  [[ "$output" == *"dir=[$BATS_TEST_TMPDIR/personal]"* ]]
+}
+
+@test "no cd prefix when the hit's cwd is already the current directory" {
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
+  run env HOME="$FIXHOME" CCFIND_INTERACTIVE=0 \
+    zsh -fc 'cd "$2"; source "$1"; ccfind -N term' _ "$CCFIND_ZSH" "$BATS_TEST_TMPDIR/proj"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude --resume s1"* ]]
+  [[ "$output" != *"cd "* ]]
+}
+
+@test "single-profile fallback: configured profiles that are all absent fall back to ~/.claude" {
+  # The shape a shared .env produces on a single-account host: both profiles
+  # named, neither present. Every token is skipped, profiles_on stays 0, and
+  # ccfind must behave exactly as if CCFIND_PROFILES were never set — no label
+  # column and, crucially, no CLAUDE_CONFIG_DIR on the resume line.
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/gone-a personal:$BATS_TEST_TMPDIR/gone-b"
+  run_ccfind -N term
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$BATS_TEST_TMPDIR/proj"* ]]
+  [[ "$output" != *"work:"* && "$output" != *"personal:"* ]]
+  [[ "$output" != *"CLAUDE_CONFIG_DIR"* ]]
+  local line; line="$(resume_line_from_output)"
+  install_claude_stub
+  run_resume "$line"
+  [[ "$output" == *"dir=[<unset>]"* ]]
+}
+
+@test "single-profile: one configured profile that IS present still labels and pins the dir" {
+  # Current behavior, pinned deliberately: profiles_on flips on for a single
+  # surviving profile, so hits carry its label and the resume line presets
+  # CLAUDE_CONFIG_DIR. Correct seat either way — but note that a preset dir
+  # makes claude-profile's wrapper step fully aside (no launch-time
+  # auto-rotation), which is why the all-absent case above must NOT do this.
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
+  export CCFIND_PROFILES="work:$FIXHOME/.claude personal:$BATS_TEST_TMPDIR/gone"
+  run_ccfind -N term
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"work:$BATS_TEST_TMPDIR/proj"* ]]
+  [[ "$output" == *"CLAUDE_CONFIG_DIR=$FIXHOME/.claude claude --resume s1"* ]]
+}

@@ -21,6 +21,10 @@ ccfind_setup() {
 
   export CCFIND_INTERACTIVE=0     # always the flat list — deterministic, no TTY
   unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX
+  # Anything running these tests from inside a Claude Code session (or any
+  # profile-switching wrapper) has CLAUDE_CONFIG_DIR exported; it would be
+  # inherited by an executed resume line and mask what ccfind actually emits.
+  unset CLAUDE_CONFIG_DIR
 }
 
 # mk_session <config-dir> <cwd> <id> <text>
@@ -52,4 +56,26 @@ exit 0
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# install_claude_stub — shadow `claude` with a stub that reports the argv and
+# the CLAUDE_CONFIG_DIR it inherited. Lets a test *execute* an emitted resume
+# line and assert where it would actually have landed, rather than only
+# string-matching the line. (Mirrors the receiving-end wrapper in
+# claude-profile, which honors a caller-set CLAUDE_CONFIG_DIR verbatim.)
+install_claude_stub() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "CLAUDE argv=[$*] dir=[${CLAUDE_CONFIG_DIR-<unset>}] pwd=[$PWD]"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+}
+
+# resume_line_from_output — the resume command ccfind printed for the first hit.
+resume_line_from_output() { printf '%s\n' "$output" | grep -m1 -- 'claude --resume'; }
+
+# run_resume <line> — execute an emitted resume line with the stub on PATH.
+run_resume() {
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$FIXHOME" bash -c "$1"
 }
