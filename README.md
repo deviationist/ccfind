@@ -9,6 +9,10 @@ session is a `.jsonl` transcript under
 (or a chosen subtree), lists matches newest-first, and either drops you into an
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
+<div align="center">
+  <img src="assets/demo-490b20.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+</div>
+
 ## Install
 
 ```zsh
@@ -36,7 +40,7 @@ ccfind -d <dir> <text...>          # only sessions whose cwd is <dir> or below i
 ccfind -d . <text...>              # scope to the current directory's subtree
 ccfind -n <max> <text...>          # cap the number of hits shown (default 10)
 ccfind -N <text...>                # force the flat-list output (opt out of the picker)
-ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0)
+ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0 + the TTY check)
 ccfind [-d <dir>] [-n <max>]       # no query → just list the most recent sessions
 ccfind -r <text...>                # also search the configured remote hosts (CCFIND_HOSTS)
 ccfindr <text...>                  # alias for `ccfind -r` (define in ~/.zshrc)
@@ -44,12 +48,19 @@ ccfind -H "host-a host-b" <text...># search these ssh hosts (implies remote, ove
 ccfind -l <text...>                # force local only (trumps -r / -H)
 ccfind <profile> <text...>         # scope local search to one CCFIND_PROFILES profile
 ccfind -p <profile> <text...>      # same, explicit form
+ccfind -C <text...>                # no colour (also: NO_COLOR=1, CCFIND_COLOR=never)
 ```
 
 ### Interactive picker (default)
 
 When `fzf` is installed and both stdin and stdout are TTYs, `ccfind` shows an `fzf`
-picker of the hits (timestamp · cwd · snippet, newest first).
+picker of the hits — one aligned line per session: when it was last touched, which
+profile or host it belongs to, its working directory, and the matching text with the
+search term picked out.
+
+<div align="center">
+  <img src="assets/picker-490b20.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+</div>
 
 | Key | Action |
 |---|---|
@@ -61,6 +72,15 @@ picker of the hits (timestamp · cwd · snippet, newest first).
 
 The `cd` persists because `ccfind` is a function, not a subshell.
 
+`→` opens the session next to the list — the last few messages, with the search
+term highlighted where it hit, so you can tell two similar-looking sessions apart
+before committing to one. On a remote hit the transcript is fetched over ssh on
+demand (once per session, then cached for as long as the picker is open):
+
+<div align="center">
+  <img src="assets/preview-490b20.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+</div>
+
 ### Flat-list fallback
 
 Each hit prints the session's timestamp + working directory, a snippet centred on
@@ -70,6 +90,10 @@ session lived elsewhere, so it reloads in its original project context — corre
 when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`, or
 `CCFIND_INTERACTIVE=0` is set.
 
+<div align="center">
+  <img src="assets/list-490b20.svg" alt="the ccfind flat list: each hit as a timestamp and profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+</div>
+
 ```zsh
 ccfind "connection refused"      # picker (if fzf+TTY) over the hits
 ccfind -d ~/code/myproject       # everything done in that repo, newest first
@@ -77,6 +101,29 @@ ccfind -n 50 deploy              # show up to 50 hits (same as CCFIND_MAX=50)
 ccfind -N deploy                 # flat-list output, copy/paste the resume command
 ccfind deploy | less             # auto-flat-list (no TTY on stdout)
 ```
+
+## Colour
+
+Output is coloured when a human is looking at it and plain when anything else is.
+The colours carry information rather than decoration:
+
+- the **profile / host label** is cyan for a local profile and magenta for a remote
+  host — the one glance that tells you whether `Enter` resumes here or over ssh;
+- the **search term** is picked out inside every snippet, in the list, in the picker
+  and in the preview pane, so you can see *why* each session matched;
+- the **resume command** is green: the line you copy;
+- timestamps, separators and the surrounding snippet text are dimmed out of the way.
+
+Colour switches itself off the moment stdout is not a terminal, so
+`ccfind foo | grep …`, `> file` and every script that parses the output see exactly
+the same bytes they did before. To force the question:
+
+| | |
+|---|---|
+| `-C` / `--no-color` | plain output for this call, whatever else is set |
+| `NO_COLOR=1` | plain, per <https://no-color.org> |
+| `CCFIND_COLOR=never` | plain |
+| `CCFIND_COLOR=always` | coloured even when piped (what the README images use) |
 
 ## Multi-profile search (opt-in)
 
@@ -188,6 +235,10 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 2024); older fzf silently gets the plain merged list. No effect on the flat list,
 local-only runs, or when `CCFIND_TABS` is unset.
 
+<div align="center">
+  <img src="assets/tabs-490b20.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+</div>
+
 ## Notes
 
 - **Sort order:** newest first, by the transcript file's last-modified time
@@ -211,6 +262,32 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |
+| `CCFIND_COLOR` | `auto` | `always` / `never` override the "colour only on a terminal" default. `NO_COLOR` and `-C` also force plain. |
+
+## Assets
+
+The README images are regenerated by:
+
+```sh
+zsh tools/generate-readme-svg.zsh    # → assets/{demo,picker,preview,tabs,list}-<hash>.svg + README refs
+zsh tools/generate-readme-svg.zsh /tmp/out   # fixed names elsewhere, README untouched
+```
+
+It builds a hermetic sandbox — a fake `$HOME` with two seeded Claude profiles, a
+stub `ssh` standing in for the remote host, and a stub `fzf` that records the rows
+the real picker is handed — and runs ccfind **unmodified** with
+`CCFIND_COLOR=always`. The text in the images is therefore genuine output; only the
+window chrome and fzf's own furniture are drawn. It runs against a copy of
+`ccfind.zsh`, so your own `.env` never leaks into an image.
+
+`demo.svg` is the same material on a CSS keyframe timeline — an SVG in an `<img>`
+renders with scripting disabled but declarative animation live, which is what makes
+it work on GitHub. The four stills cover the same ground for anything that doesn't
+animate, and `prefers-reduced-motion` freezes the demo on its final frame.
+
+Rerun it whenever the picker layout, the flat list or the colours change, and commit
+the SVGs together with the README, whose `<img>` refs it rewrites (the hash in each
+filename busts GitHub's image cache).
 
 ## License
 
