@@ -79,3 +79,21 @@ resume_line_from_output() { printf '%s\n' "$output" | grep -m1 -- 'claude --resu
 run_resume() {
   run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$FIXHOME" bash -c "$1"
 }
+
+# install_fzf_stub — shadow `fzf` with a stub that records the rows it is fed
+# (and its argv) and exits 130, fzf's "cancelled". Lets the picker path be
+# driven with no terminal and nothing selected, so what the picker *would*
+# display is assertable. Same trick the README-SVG generator uses.
+install_fzf_stub() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  export FZF_ROWS="$BATS_TEST_TMPDIR/fzf-rows" FZF_ARGV="$BATS_TEST_TMPDIR/fzf-argv"
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in --version) echo "0.74.2 (stub)"; exit 0 ;; esac
+printf '%s\n' "$@" > "$FZF_ARGV"
+cat > "$FZF_ROWS"
+exit 130
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
