@@ -13,7 +13,8 @@ Config auto-loads from a gitignored `.env` beside the script (see `.env.example`
 ccfind [text...]                   literal, case-insensitive; newest-first
   -d <dir>     scope to sessions whose cwd is <dir> or below
   -n <max>     cap hits (default 10; = CCFIND_MAX)
-  -N | -i      force flat-list / force picker (overrides CCFIND_INTERACTIVE)
+  -N | -i      force flat-list / force picker (-i also overrides the TTY check)
+  -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
   -r           also search CCFIND_HOSTS over ssh   (alias: ccfindr = ccfind -r)
   -H "<hosts>" search an explicit ssh-alias list (implies remote)
   -l           force local only (trumps -r / -H)
@@ -34,6 +35,12 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   Claude config dirs, tags each hit with its label. `ccfind foo` = all profiles;
   `ccfind <label> foo` / `-p <label>` = one. Resume runs under that profile
   (`CLAUDE_CONFIG_DIR=<dir> claude --resume`). Unset → single `~/.claude` (unchanged).
+- **Colour:** roles, not decoration — cyan = local profile label, magenta = remote
+  host, bold yellow = the search term inside every snippet (list, picker and preview),
+  green = the resume command, dim = timestamps/separators. Off whenever stdout is not
+  a terminal, so piped output stays byte-plain; `CCFIND_COLOR=always|never`, `NO_COLOR`
+  and `-C` override. The picker composes one pre-padded display field (TSV field 7,
+  `--with-nth=7`) so columns align; fields 1-6 stay plain for the resume/preview/tabs.
 - **Tab views (`CCFIND_TABS=1`, multi-host/multi-profile picker, fzf ≥ 0.45):** header
   bar `All │ <profile> │ <host>…`, Tab/Shift-Tab cycle; each tab shows its own newest
   hits. Silently off below fzf 0.45.
@@ -48,6 +55,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
 | `CCFIND_INTERACTIVE` | 1 | `0` → default to flat list |
+| `CCFIND_COLOR` | auto | `always` / `never`; auto = colour only on a terminal |
 
 ## Conventions
 
@@ -55,3 +63,6 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 - `.env` is sourced inside function scope with the keys pre-`typeset`ed local, so it
   never leaks into the interactive shell.
 - Portable across macOS (BSD `stat`) and Linux (GNU `stat`); no bashisms.
+- Tests: `tests/run.sh` (bats; flat-list path, so no fzf/ssh/TTY needed). README
+  images: `zsh tools/generate-readme-svg.zsh` — hermetic sandbox + stub `fzf`/`ssh`,
+  runs the real tool with `CCFIND_COLOR=always`; commit the SVGs with the README.
