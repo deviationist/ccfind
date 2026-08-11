@@ -224,3 +224,123 @@ setup() { ccfind_setup; }
   [[ "$output" == *"work:$BATS_TEST_TMPDIR/proj"* ]]
   [[ "$output" == *"CLAUDE_CONFIG_DIR=$FIXHOME/.claude claude --resume s1"* ]]
 }
+
+# --- colour ----------------------------------------------------------------
+# The contract is that colour is a display layer only: on when a human is
+# looking, gone the moment output is piped — which is what keeps every
+# assertion above (and any user's grep) working on plain bytes.
+
+@test "colour is off when stdout is not a terminal" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  run_ccfind -N deploy
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\033['* ]]
+}
+
+@test "CCFIND_COLOR=always emits SGR even when piped" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  export CCFIND_COLOR=always
+  run_ccfind -N deploy
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\033[32m'*"claude --resume s1"* ]]   # the resume command
+}
+
+@test "the match is highlighted inside the snippet" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "before DePlOy after"
+  export CCFIND_COLOR=always
+  run_ccfind -N deploy
+  [ "$status" -eq 0 ]
+  # case-insensitive, and the original casing survives the highlighting
+  [[ "$output" == *$'\033[1;33m'"DePlOy"$'\033[0m'* ]]
+}
+
+@test "-C strips the colour even with CCFIND_COLOR=always" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  export CCFIND_COLOR=always
+  run_ccfind -N -C deploy
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\033['* ]]
+}
+
+@test "NO_COLOR wins over the auto default" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  export NO_COLOR=1
+  run_ccfind -N deploy
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\033['* ]]
+}
+
+@test "an empty result says what was searched" {
+  mk_session "$BATS_TEST_TMPDIR/work" "/w/a" w1 "term"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work"
+  run_ccfind -N zzzznope
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No matching sessions."* ]]
+  [[ "$output" == *'query "zzzznope"'* ]]
+  [[ "$output" == *"profiles: work"* ]]
+}
+
+# --- the two colour helpers, unit-tested ------------------------------------
+# The picker path needs a TTY, so these exercise its two moving parts directly:
+# a query is highlighted literally (not as a glob), and a row that somehow came
+# back still carrying SGR is stripped before it is parsed into fields.
+
+@test "_ccfind_hl treats a glob-metacharacter query literally" {
+  run env zsh -fc 'source "$1"; _CCF_HIT="<"; _CCF_OFF=">"
+                   _ccfind_hl "keep a*b and a*b" "a*b" ""' _ "$CCFIND_ZSH"
+  [ "$status" -eq 0 ]
+  [ "$output" = "keep <a*b> and <a*b>" ]
+}
+
+@test "_ccfind_strip_sgr removes every SGR run" {
+  run env zsh -fc 'source "$1"
+                   _ccfind_strip_sgr $'"'"'\033[36mwork\033[0m\tid\t\033[2mts\033[0m'"'"'' _ "$CCFIND_ZSH"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'work\tid\tts')" ]
+}
+
+# --- the picker path, driven through a stub fzf -----------------------------
+# -i is documented as the explicit "give me the picker", overriding both
+# CCFIND_INTERACTIVE=0 and the TTY sniff — which is the only reason the picker
+# is reachable from a test (or from the SVG generator) at all. These pin the
+# row contract the picker is built on, without needing a terminal.
+
+@test "-i reaches the picker with no TTY, and hands fzf the rows" {
+  install_fzf_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  run_ccfind -i deploy
+  [ "$status" -eq 0 ]          # stub exits 130 = cancelled → nothing resumed
+  [ -s "$FZF_ROWS" ]
+  [[ "$(cat "$FZF_ARGV")" == *"--with-nth=7"* ]]
+}
+
+@test "picker rows keep the data fields plain behind the display field" {
+  install_fzf_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  export CCFIND_COLOR=always
+  run_ccfind -i deploy
+  [ "$status" -eq 0 ]
+  local row; row="$(head -1 "$FZF_ROWS")"
+  # 7 fields: host, id, cwd, ts, snippet, path, display
+  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 7 ]
+  # 1 (host) and 6 (path) are what the resume and the preview read — no SGR in
+  # them, or a profile label stops matching and a path stops opening.
+  [ "$(cut -f1 <<<"$row")" = "local" ]
+  [ "$(cut -f2 <<<"$row")" = "s1" ]
+  [ "$(cut -f3 <<<"$row")" = "/proj/a" ]
+  [[ "$(cut -f6 <<<"$row")" == *"/projects/-proj-a/s1.jsonl" ]]
+  # …while field 7, the one fzf shows, carries the colour and the columns
+  [[ "$(cut -f7 <<<"$row")" == *$'\033['* ]]
+  [[ "$(cut -f7 <<<"$row")" == *"/proj/a"* ]]
+}
+
+@test "the picker gets one row per hit, newest first" {
+  install_fzf_stub
+  mk_session "$FIXHOME/.claude" "/proj/old" o1 "term"
+  sleep 1
+  mk_session "$FIXHOME/.claude" "/proj/new" n1 "term"
+  run_ccfind -i term
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FZF_ROWS")" -eq 2 ]
+  [[ "$(head -1 "$FZF_ROWS")" == *"/proj/new"* ]]
+}

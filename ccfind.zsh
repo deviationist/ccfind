@@ -2,6 +2,81 @@
 # subshell can source us back in to call _ccfind_preview without hardcoding.
 typeset -g _CCFIND_SOURCE="${${(%):-%x}:A}"
 
+# ---- colour ----------------------------------------------------------------
+# One seam for every SGR ccfind emits. Colour is OFF when stdout is not a
+# terminal, so a piped or redirected run stays byte-plain and greppable (the
+# test suite leans on exactly that); $CCFIND_COLOR=always|never forces it
+# either way — `always` is what the README-SVG generator uses — and NO_COLOR
+# (https://no-color.org) wins over the auto case.
+#
+# The palette sticks to the 8 basic ANSI colours rather than 256-colour codes,
+# so it inherits whatever the terminal theme has decided those mean instead of
+# fighting it. Roles, not decoration: the label colour is the one thing that
+# says local-profile (cyan) vs remote-host (magenta) at a glance, and the hit
+# colour is what makes a snippet show *why* the session matched.
+#
+# Assigns into its caller's scope: every _CCF_* name is declared `local` in
+# ccfind, so nothing here leaks into the interactive shell. Keep that `local`
+# list in sync with the names set below.
+function _ccfind_colors() {
+  local on=0
+  case "${CCFIND_COLOR:-auto}" in
+    always) on=1 ;;
+    never)  on=0 ;;
+    *)      [[ -z "${NO_COLOR:-}" && -t 1 ]] && on=1 ;;
+  esac
+  if (( on )); then
+    _CCF_OFF=$'\033[0m'    _CCF_DIM=$'\033[2m'     _CCF_TS=$'\033[1m'
+    _CCF_PROF=$'\033[36m'  _CCF_HOST=$'\033[35m'   _CCF_SNIP=$'\033[2m'
+    _CCF_HIT=$'\033[1;33m' _CCF_CMD=$'\033[32m'    _CCF_KEY=$'\033[1m'
+    _CCF_WARN=$'\033[33m'  _CCF_ERR=$'\033[31m'
+  else
+    _CCF_OFF='' _CCF_DIM='' _CCF_TS='' _CCF_PROF='' _CCF_HOST='' _CCF_SNIP=''
+    _CCF_HIT='' _CCF_CMD='' _CCF_KEY='' _CCF_WARN='' _CCF_ERR=''
+  fi
+}
+
+# _ccfind_hl <text> <query> <ctx> — wrap every case-insensitive occurrence of
+# <query> in <text> with the hit colour, restoring <ctx> (the colour the run
+# sits inside) after each one, and print the result.
+#
+# Literal, not regex — the search itself is literal, and a query may well hold
+# glob metacharacters. `${lower%%$q*}` is the trick: a parameter expanded into
+# a pattern position is NOT itself re-read as a pattern in zsh, so $q matches
+# verbatim while the `*` written here stays a wildcard; `%%` takes the longest
+# suffix, leaving the shortest prefix = the first occurrence.
+function _ccfind_hl() {
+  local s="$1" q="$2" ctx="$3" out="" pre rest lower lq
+  if [[ -z "$s" || -z "$q" || -z "$_CCF_HIT" ]]; then print -rn -- "$s"; return; fi
+  lq="${(L)q}"; rest="$s"
+  while [[ -n "$rest" ]]; do
+    lower="${(L)rest}"
+    (( ${#lower} == ${#rest} )) || break   # a case fold that changed the length
+                                           # (non-ASCII) breaks the 1:1 index map
+    pre="${lower%%$lq*}"
+    (( ${#pre} == ${#lower} )) && break     # no further occurrence
+    out+="${rest[1,${#pre}]}${_CCF_HIT}${rest[${#pre}+1,${#pre}+${#lq}]}${_CCF_OFF}${ctx}"
+    rest="${rest[${#pre}+${#lq}+1,-1]}"
+  done
+  print -rn -- "$out$rest"
+}
+
+# Strip SGR runs from a string. fzf --ansi returns a selected line with the
+# escapes it parsed already removed, so this is a no-op on that path — but the
+# picker is fed *coloured* rows, and a row that ever came back carrying escapes
+# would turn a profile label into an unknown host (i.e. an ssh attempt at a
+# machine named "\033[36mwork"). Cheap enough to rule out rather than trust.
+# Written as a loop, not a glob: the `#` quantifier needs extended_glob, which
+# ccfind deliberately does not turn on.
+function _ccfind_strip_sgr() {
+  local s="$1" out="" pre
+  while [[ "$s" == *$'\033['* ]]; do
+    pre="${s%%$'\033['*}"; out+="$pre"
+    s="${s#*$'\033['}"; s="${s#*m}"
+  done
+  print -rn -- "$out$s"
+}
+
 # Render the last few user/assistant messages of a transcript file for the
 # fzf preview pane. Defined at top level (not nested in ccfind) so the
 # preview subshell can source-and-call it cleanly.
@@ -29,7 +104,17 @@ function _ccfind_preview() {
     f="$cache"
   fi
   [[ -r "$f" ]] || { echo "preview: cannot read $label"; return 0; }
-  printf '\033[1m%s\033[0m\n\n' "$label"
+  # The preview only ever renders into fzf's pane, so it colours unconditionally
+  # (its stdout is a pipe — the -t 1 rule the rest of the tool uses would switch
+  # colour off exactly where it is wanted). NO_COLOR is still honoured, here and
+  # in the python below.
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    printf '%s\n\n' "$label"
+  elif [[ "$label" == *:* && "$label" != "$f" ]]; then
+    printf '\033[35m%s\033[0m\033[2m:\033[0m\033[1m%s\033[0m\n\n' "${label%%:*}" "${label#*:}"
+  else
+    printf '\033[1m%s\033[0m\n\n' "$label"
+  fi
   if ! command -v python3 >/dev/null 2>&1; then
     tail -n 40 -- "$f" 2>/dev/null
     return 0
@@ -43,7 +128,42 @@ except Exception as e:
     print(f"preview error: {e}")
     sys.exit(0)
 
-BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+import os
+
+# Colour is on unless NO_COLOR: this renders into fzf's preview pane, never
+# into a pipe a script would parse.
+_C = "NO_COLOR" not in os.environ
+def sgr(code):
+    return f"\033[{code}m" if _C else ""
+BOLD, DIM, RESET = sgr(1), sgr(2), sgr(0)
+USERC, ASSTC = sgr("1;36"), sgr("1;35")   # cyan / magenta role labels
+HIT = sgr("1;33")                          # the search term, as in the list
+
+# The query ccfind matched on, so the preview can show *where* it hit rather
+# than leaving you to spot it. Empty for a no-query listing.
+QUERY = os.environ.get("CCFIND_PV_QUERY", "")
+
+
+def hl(text, ctx=""):
+    """Wrap case-insensitive occurrences of QUERY in the hit colour, restoring
+    `ctx` after each — the literal-substring twin of the shell's _ccfind_hl."""
+    if not QUERY or not HIT:
+        return text
+    low, lq = text.lower(), QUERY.lower()
+    if len(low) != len(text) or len(lq) != len(QUERY):
+        return text            # a case fold changed the length: indices no longer map
+    out, i = [], 0
+    while True:
+        j = low.find(lq, i)
+        if j < 0:
+            break
+        out.append(text[i:j])
+        out.append(HIT + text[j:j + len(lq)] + RESET + ctx)
+        i = j + len(lq)
+    out.append(text[i:])
+    return "".join(out)
+
+
 MAX_MSGS = 8       # show this many most-recent user+assistant messages
 MAX_CHARS = 1200   # per-message text cap
 
@@ -83,15 +203,22 @@ for line in lines:
         text = text[:MAX_CHARS] + f"{DIM}…[truncated]{RESET}"
     records.append((t, text))
 
+total = len(records)
 records = records[-MAX_MSGS:]
 if not records:
     print(f"{DIM}(no user/assistant messages with text content){RESET}")
     sys.exit(0)
 
+# How much of the session you are actually looking at — without this the pane
+# reads like the whole transcript.
+shown = f"last {len(records)} of {total} messages" if total > len(records) \
+        else f"{total} message" + ("s" if total != 1 else "")
+print(f"{DIM}{shown}{RESET}\n")
+
 for t, text in records:
-    label = "USER" if t == "user" else "ASSISTANT"
-    print(f"{BOLD}── {label} ──{RESET}")
-    print(text)
+    label, col = ("USER", USERC) if t == "user" else ("ASSISTANT", ASSTC)
+    print(f"{col}── {label} ──{RESET}")
+    print(hl(text))
     print()
 PYEOF
 }
@@ -176,29 +303,41 @@ function ccfind() {
   setopt local_options no_notify no_monitor   # silent background ssh fan-out
   local max="${CCFIND_MAX:-10}"
   local scope=""
-  local interactive="${CCFIND_INTERACTIVE:-1}"
-  local hosts_override="" local_only=0 remote=0 prof_filter=""
+  local interactive="${CCFIND_INTERACTIVE:-1}" interactive_forced=0
+  local hosts_override="" local_only=0 remote=0 prof_filter="" color_override=""
+  # Every colour slot _ccfind_colors fills. Declared local here (it assigns into
+  # its caller's scope) so no SGR variable ever leaks into the interactive shell.
+  local _CCF_OFF _CCF_DIM _CCF_TS _CCF_PROF _CCF_HOST _CCF_SNIP _CCF_HIT \
+        _CCF_CMD _CCF_KEY _CCF_WARN _CCF_ERR
 
   while [[ "$1" == -* ]]; do
     case "$1" in
       -d|--dir) scope="$2"; shift 2 ;;
       -n|--max) max="$2"; shift 2 ;;
-      -i|--interactive) interactive=1; shift ;;
+      -i|--interactive) interactive=1; interactive_forced=1; shift ;;
       -N|--no-interactive) interactive=0; shift ;;
       -r|--remote) remote=1; shift ;;
       -l|--local) local_only=1; shift ;;
       -H|--hosts) hosts_override="$2"; shift 2 ;;
       -p|--profile) prof_filter="$2"; shift 2 ;;
+      -C|--no-color|--no-colour) color_override=never; shift ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-n <max>] [-i|-N] [-r|-l] [-H <hosts>] [-p <profile>] [<profile>] [text...]"
+        echo "usage: ccfind [-d <dir>] [-n <max>] [-i|-N] [-r|-l] [-H <hosts>] [-p <profile>] [-C] [<profile>] [text...]"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  multi-profile (CCFIND_PROFILES): -p <label>, or a leading <label> arg, scopes to one profile"
+        echo "  -C/--no-color strips the colour (as do NO_COLOR=1 and CCFIND_COLOR=never); output is"
+        echo "  plain whenever stdout is not a terminal, so piping is unaffected either way"
         return 0 ;;
       --) shift; break ;;
       *) echo "ccfind: unknown option $1" >&2; return 2 ;;
     esac
   done
+
+  # Resolve the palette once the flags are known: -C is the loudest voice, then
+  # $CCFIND_COLOR / NO_COLOR, then whether stdout is a terminal at all.
+  [[ -n "$color_override" ]] && local CCFIND_COLOR="$color_override"
+  _ccfind_colors
 
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
@@ -253,7 +392,7 @@ function ccfind() {
   # A profile filter (from -p or the positional) narrows the local set to one.
   if [[ -n "$prof_filter" ]]; then
     if [[ -z "${prof_cfgdir[$prof_filter]+x}" ]]; then
-      echo "ccfind: unknown profile '$prof_filter' (configured: ${prof_labels[*]})" >&2
+      print -u2 -r -- "${_CCF_ERR}ccfind: unknown profile '$prof_filter'${_CCF_OFF} (configured: ${prof_labels[*]})"
       return 2
     fi
     prof_labels=("$prof_filter"); prof_roots=("${prof_cfgdir[$prof_filter]}/projects")
@@ -267,7 +406,7 @@ function ccfind() {
       hosts_raw="$hosts_override"
     elif (( remote )); then
       hosts_raw="$_cfg_hosts"
-      [[ -z "$hosts_raw" ]] && echo "ccfind: -r given but no CCFIND_HOSTS configured (env or the .env beside ccfind.zsh) — searching locally" >&2
+      [[ -z "$hosts_raw" ]] && print -u2 -r -- "${_CCF_WARN}ccfind: -r given but no CCFIND_HOSTS configured${_CCF_OFF} (env or the .env beside ccfind.zsh) — searching locally"
     fi
   fi
   local -a remote_hosts
@@ -276,7 +415,7 @@ function ccfind() {
   local _any_local=0 _r0
   for _r0 in "${prof_roots[@]}"; do [[ -d "$_r0" ]] && { _any_local=1; break; }; done
   if (( ! _any_local && ${#remote_hosts} == 0 )); then
-    echo "❌ No Claude sessions directory found (looked in: ${prof_roots[*]})" >&2
+    print -u2 -r -- "${_CCF_ERR}❌ No Claude sessions directory found${_CCF_OFF} (looked in: ${prof_roots[*]})"
     return 1
   fi
 
@@ -430,7 +569,18 @@ RSEOF
 
   local remote_count=0
   if (( ${#remote_hosts} > 0 )); then
+    # The ssh fan-out is the one step that can visibly stall (up to the 6 s
+    # connect timeout per host), and until now it stalled silently. Say what is
+    # being waited on, then erase the line — status, not output, so it goes to
+    # stderr and only when there is a terminal there to redraw.
+    local _busy=0
+    if [[ -t 2 ]]; then
+      _busy=1
+      printf '%s⟳ searching %d host(s): %s…%s\r' \
+        "$_CCF_DIM" ${#remote_hosts} "${(j:, :)remote_hosts}" "$_CCF_OFF" >&2
+    fi
     wait   # all fan-out subshells; per-host status is in the .rc files
+    (( _busy )) && printf '\033[2K\r' >&2
     local -a _rfailed
     local line _hrc
     for h in "${remote_hosts[@]}"; do
@@ -445,11 +595,20 @@ RSEOF
         (( remote_count++ ))
       done <"$rtmpdir/${h//\//_}.tsv"
     done
-    (( ${#_rfailed} > 0 )) && echo "ccfind: remote search failed on: ${_rfailed[*]}" >&2
+    (( ${#_rfailed} > 0 )) && print -u2 -r -- "${_CCF_WARN}ccfind: remote search failed on:${_CCF_OFF} ${_rfailed[*]}"
   fi
 
   if (( ${#records} == 0 )); then
     echo "No matching sessions."
+    # An empty result is ambiguous on its own — a typo'd query and a scope that
+    # excluded everything look identical. Spell out what the search actually
+    # covered so the next attempt is an informed one.
+    local -a _what
+    [[ -n "$query" ]] && _what+=("query \"$query\"")
+    (( profiles_on )) && _what+=("profiles: ${(j:, :)prof_labels}")
+    (( ${#remote_hosts} > 0 )) && _what+=("hosts: ${(j:, :)remote_hosts}")
+    [[ -n "$abs" ]] && _what+=("under $abs")
+    (( ${#_what} > 0 )) && print -r -- "${_CCF_DIM}   ${(j: · :)_what}${_CCF_OFF}"
     return 0
   fi
 
@@ -475,6 +634,7 @@ RSEOF
   local _host _path _rest
   _ccfind_parse_row() {
     _rest="$1"
+    [[ "$_rest" == *$'\033['* ]] && _rest="$(_ccfind_strip_sgr "$_rest")"
     _host="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
     _id="${_rest%%$'\t'*}";   _rest="${_rest#*$'\t'}"
     _cwd="${_rest%%$'\t'*}";  _rest="${_rest#*$'\t'}"
@@ -495,20 +655,70 @@ RSEOF
     fi
   }
 
-  # Picker path: interactive requested AND fzf installed AND on a TTY.
-  if (( interactive )) && command -v fzf >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
-    local header='↑/↓ navigate · Enter resume · → preview · ← hide · Esc cancel'
+  # Picker path: interactive requested AND fzf installed AND on a TTY — unless
+  # -i was passed, which is the explicit "give me the picker" and so overrides
+  # the TTY sniff as well as CCFIND_INTERACTIVE=0. (The default, TTY-sniffing
+  # path is what makes `ccfind foo | less` fall back on its own; -i is for the
+  # caller who knows better — a wrapper, or the README-SVG generator, which
+  # drives the picker through a stub fzf with no terminal anywhere in sight.)
+  if (( interactive )) && command -v fzf >/dev/null 2>&1 \
+     && { (( interactive_forced )) || [[ -t 0 && -t 1 ]] }; then
+    local _k="$_CCF_KEY" _o="$_CCF_OFF"
+    local header="${_k}↑/↓${_o} navigate · ${_k}Enter${_o} resume · ${_k}→${_o} preview · ${_k}←${_o} hide · ${_k}Esc${_o} cancel"
     if (( truncated )); then
-      header="$header   (showing $max of $total; raise with -n <max> or \$CCFIND_MAX)"
+      header="$header   ${_CCF_DIM}(showing $max of $total; raise with -n <max> or \$CCFIND_MAX)${_o}"
     fi
 
-    # Column 4 = mtime, 1 = host (only shown in multi-host mode), 3 = cwd,
-    # 5 = snippet; columns 2 (id) and 6 (filepath) stay hidden — 6 feeds the
-    # preview command together with 1.
-    local withnth='4,3,5' pvcache=''
-    if (( ${#remote_hosts} > 0 || ${#prof_labels} > 1 )); then
-      withnth='4,1,3,5'   # show the host/profile column
-    fi
+    # ---- the display column --------------------------------------------
+    # fzf has no column model: with --with-nth it concatenates the chosen
+    # fields and leaves them on the terminal's 8-column tab stops, so the cwd
+    # and the snippet start somewhere different on every row. So compose ONE
+    # pre-padded, pre-coloured field and show only that (--with-nth=7).
+    # Alignment we control; the six data fields stay plain behind it, which is
+    # what lets the tab views filter on a bare "<label>\t" prefix and the
+    # resume path parse fields it can trust. fzf strips the colour back off
+    # whatever it hands us on the way out.
+    integer w_host=0 w_cwd=0
+    local _dcwd
+    local _showhost=0
+    (( ${#remote_hosts} > 0 || ${#prof_labels} > 1 )) && _showhost=1
+    for _r in "${rows[@]}"; do            # first pass: natural column widths
+      _ccfind_parse_row "$_r"
+      (( ${#_host} > w_host )) && w_host=${#_host}
+      _dcwd="${_cwd/#$HOME/~}"
+      (( ${#_dcwd} > w_cwd )) && w_cwd=${#_dcwd}
+    done
+    (( w_cwd > 44 )) && w_cwd=44          # a deep path must not push the snippet off-screen
+
+    local _crow _dts _dhost
+    _ccfind_disp_row() {   # <raw row> → the row plus field 7, its rendered line
+      _ccfind_parse_row "$1"
+      if [[ -n "${prof_cfgdir[$_host]+x}" ]]; then _crow="$_CCF_PROF"; else _crow="$_CCF_HOST"; fi
+      # $HOME is contracted for display only — the cd still uses field 3 — and a
+      # path too long for the column keeps its tail, which is its telling half.
+      _dcwd="${_cwd/#$HOME/~}"
+      (( ${#_dcwd} > w_cwd )) && _dcwd="…${_dcwd[-(w_cwd-1),-1]}"
+      # The snippet arrives with ~45 characters of lead-in before the match —
+      # fine in the full-width flat list, but in the picker's last column that
+      # lead is usually all you get, with the match itself off the right edge.
+      # Pull the window forward so the reason the row matched leads the column.
+      local _sn="$_snippet" _lsn _pre
+      if [[ -n "$query" && -n "$_sn" ]]; then
+        _lsn="${(L)_sn}"; _pre="${_lsn%%${(L)query}*}"
+        (( ${#_pre} != ${#_lsn} && ${#_pre} > 14 )) && _sn="…${_sn[${#_pre}-11,-1]}"
+      fi
+      _dts="${_CCF_DIM}${_ts}${_CCF_OFF}"
+      _dhost=""
+      (( _showhost )) && _dhost="${_crow}${(r:$w_host:)_host}${_CCF_OFF}  "
+      # Pad on the plain text, colour after: an SGR run counts toward a string's
+      # length but draws nothing, so padding a coloured field skews the column.
+      print -rn -- "$1"$'\t'"${_dts}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP")${_CCF_OFF}"
+    }
+
+    # Field 7 is the composed display line (built below); 1-6 are the data
+    # fields, hidden — 1 (host) and 6 (path) feed the preview command, 2/3 the
+    # resume. Matching therefore runs over exactly what you can see.
+    local withnth='7' pvcache=''
     if (( ${#remote_hosts} > 0 )); then
       pvcache="$rtmpdir/pv"
       mkdir -p -- "$pvcache"
@@ -530,20 +740,22 @@ RSEOF
         # view. Profiles/hosts with zero hits get no tab.
         # NB: the match must land in an array variable first — a ${(M)...}
         # with $'\t' inside (( )) silently mismatches (zsh arith quoting).
-        local -a views vrows
+        local -a views vrows crows
         views=(All)
-        printf '%s\n' "${rows[@]}" >"$tabsdir/view-1.rows"
+        crows=(); for _r in "${rows[@]}"; do crows+=("$(_ccfind_disp_row "$_r")"); done
+        printf '%s\n' "${crows[@]}" >"$tabsdir/view-1.rows"
         local _v
         for _v in "${prof_labels[@]}" "${remote_hosts[@]}"; do
           vrows=(${(M)rows_all:#${_v}$'\t'*})
           (( ${#vrows} > 0 )) || continue
           views+=("$_v")
-          printf '%s\n' "${vrows[@]:0:$max}" >"$tabsdir/view-${#views}.rows"
+          crows=(); for _r in "${vrows[@]:0:$max}"; do crows+=("$(_ccfind_disp_row "$_r")"); done
+          printf '%s\n' "${crows[@]}" >"$tabsdir/view-${#views}.rows"
         done
         printf '%s\n' "${views[@]}" >"$tabsdir/views"
         print -r -- 1 >"$tabsdir/cur"
-        local tabhelp='Tab/⇧Tab views · Enter resume · → preview · Esc'
-        (( truncated )) && tabhelp="$tabhelp  (showing $max of $total)"
+        local tabhelp="${_k}Tab/⇧Tab${_o} views · ${_k}Enter${_o} resume · ${_k}→${_o} preview · ${_k}Esc${_o}"
+        (( truncated )) && tabhelp="$tabhelp  ${_CCF_DIM}(showing $max of $total)${_o}"
         print -r -- "$tabhelp" >"$tabsdir/help"
         header="$(_ccfind_tab_header "$tabsdir")"
         fzf_extra=(
@@ -553,14 +765,17 @@ RSEOF
       fi
     fi
 
+    local -a rows_disp
+    for _r in "${rows[@]}"; do rows_disp+=("$(_ccfind_disp_row "$_r")"); done
+
     local selected
     selected="$(
-      printf '%s\n' "${rows[@]}" \
+      printf '%s\n' "${rows_disp[@]}" \
         | fzf \
             --delimiter=$'\t' --with-nth=$withnth \
             --no-sort --ansi --reverse --height=80% \
             --header="$header" \
-            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {6}'" \
+            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}} CCFIND_PV_QUERY=${(q)query}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {6}'" \
             --preview-window='hidden,right,60%,wrap' \
             --bind 'right:show-preview' \
             --bind 'left:hide-preview' \
@@ -593,13 +808,17 @@ RSEOF
     return $?
   fi
 
-  # Flat-list path: original behaviour, plus a host tag on remote hits.
-  local resume shown=0
+  # Flat-list path: original behaviour, plus a host tag on remote hits. Same
+  # three lines per hit as before — timestamp + where, the matching snippet, the
+  # resume command — now with the label colour carrying local-vs-remote and the
+  # match lit inside the snippet. Every SGR here is empty when colour is off, so
+  # a piped run emits exactly the bytes it always did.
+  local resume shown=0 _tag
   for _r in "${rows[@]}"; do
-    (( shown > 0 )) && printf '\033[2m%s\033[0m\n' '──────────────────────────────────────────'
+    (( shown > 0 )) && printf '%s%s%s\n' "$_CCF_DIM" '──────────────────────────────────────────' "$_CCF_OFF"
     _ccfind_parse_row "$_r"
     if [[ -z "${prof_cfgdir[$_host]+x}" ]]; then          # remote hit
-      printf '\033[1m%s\033[0m  %s:%s\n' "$_ts" "$_host" "${_cwd:-?}"
+      _tag="${_CCF_HOST}${_host}${_CCF_OFF}${_CCF_DIM}:${_CCF_OFF}"
       if [[ -n "$_cfg_remote_resume" ]]; then
         resume="$_cfg_remote_resume ${(q)_host} ${(q)_cwd} ${(q)_id}"
       else
@@ -608,9 +827,9 @@ RSEOF
       fi
     else                                                   # local hit
       if (( profiles_on )); then
-        printf '\033[1m%s\033[0m  %s:%s\n' "$_ts" "$_host" "${_cwd:-?}"
+        _tag="${_CCF_PROF}${_host}${_CCF_OFF}${_CCF_DIM}:${_CCF_OFF}"
       else
-        printf '\033[1m%s\033[0m  %s\n' "$_ts" "${_cwd:-?}"
+        _tag=""
       fi
       local _pfx=""
       (( profiles_on )) && _pfx="CLAUDE_CONFIG_DIR=${(q)prof_cfgdir[$_host]} "
@@ -620,10 +839,15 @@ RSEOF
         resume="${_pfx}claude --resume $_id"
       fi
     fi
-    [[ -n "$_snippet" ]] && printf '   \033[2m…%s…\033[0m\n' "$_snippet"
-    printf '   %s\n' "$resume"
+    # Display-only contraction, as in the picker; the resume line printed two
+    # lines down still carries the path in full.
+    printf '%s%s%s  %s%s\n' "$_CCF_TS" "$_ts" "$_CCF_OFF" "$_tag" "${${_cwd:-?}/#$HOME/~}"
+    [[ -n "$_snippet" ]] && \
+      printf '   %s…%s…%s\n' "$_CCF_SNIP" "$(_ccfind_hl "$_snippet" "$query" "$_CCF_SNIP")" "$_CCF_OFF"
+    printf '   %s%s%s\n' "$_CCF_CMD" "$resume" "$_CCF_OFF"
     (( shown++ ))
   done
-  (( truncated )) && echo "… ($total total; raise with -n <max> or \$CCFIND_MAX)"
+  (( truncated )) && printf '%s… (%s total; raise with -n <max> or $CCFIND_MAX)%s\n' \
+    "$_CCF_DIM" "$total" "$_CCF_OFF"
   return 0
 }
