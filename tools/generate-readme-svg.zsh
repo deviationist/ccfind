@@ -602,9 +602,17 @@ anim_svg() {
 
   {
     svg_open $W $H "$aria"
-    # The timeline. Each frame owns a window of the cycle; the switch is a hard
-    # cut (two stops at the same percentage) so frames never cross-fade into a
-    # double-exposed terminal.
+    # The timeline. Each frame owns a window of the cycle, and the switch has to
+    # be a hard cut — a terminal does not dissolve between states, and a frame
+    # that fades leaves the one behind it showing through (the preview pane's
+    # border ghosting over the list, most visibly).
+    #
+    # step-end is what guarantees that. Writing two stops at the same percentage
+    # does NOT: duplicate stops collapse to the last declaration, so
+    # `0%,50%{opacity:0} 50%,100%{opacity:1}` is really "0 at 0%, 1 at 50%" and
+    # the browser interpolates the whole way — a half-cycle cross-fade. With
+    # step-end each value simply holds until the next stop, so one stop per
+    # switch says exactly what it means.
     print -r -- "  <style>"
     print -r -- "    .fr{opacity:0}"
     integer at=0 j
@@ -613,14 +621,13 @@ anim_svg() {
       p0=$(( at * 100.0 / total ))
       (( at += FR_DUR[j] ))
       p1=$(( at * 100.0 / total ))
-      print -r -- "    #fr$j{animation:k$j ${total}00ms infinite}"
+      print -r -- "    #fr$j{animation:k$j ${total}00ms step-end infinite}"
       if (( j == 1 )); then
-        printf '    @keyframes k%d{0%%,%.3f%%{opacity:1}%.3f%%,100%%{opacity:0}}\n' $j $p1 $p1
+        printf '    @keyframes k%d{0%%{opacity:1}%.3f%%{opacity:0}}\n' $j $p1
       elif (( j == ${#FR} )); then
-        printf '    @keyframes k%d{0%%,%.3f%%{opacity:0}%.3f%%,100%%{opacity:1}}\n' $j $p0 $p0
+        printf '    @keyframes k%d{0%%{opacity:0}%.3f%%{opacity:1}}\n' $j $p0
       else
-        printf '    @keyframes k%d{0%%,%.3f%%{opacity:0}%.3f%%,%.3f%%{opacity:1}%.3f%%,100%%{opacity:0}}\n' \
-          $j $p0 $p0 $p1 $p1
+        printf '    @keyframes k%d{0%%{opacity:0}%.3f%%{opacity:1}%.3f%%{opacity:0}}\n' $j $p0 $p1
       fi
     done
     print -r -- "    @media (prefers-reduced-motion:reduce){.fr{animation:none!important;opacity:0}#fr${#FR}{opacity:1}}"
