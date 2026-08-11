@@ -26,9 +26,25 @@ Every test is hermetic:
 - `CCFIND_INTERACTIVE=0` forces the flat-list path, so tests need no fzf/TTY.
 
 Coverage is the local search + profile logic (union, positional/`-p` scoping,
-profile-aware resume, `-d` scoping, caps, error paths). The fzf picker and the
-preview pane are interactive paths left to manual verification; the remote
-(`-r`/ssh) fan-out is covered against a stubbed `ssh`.
+profile-aware resume, `-d` scoping, caps, error paths). The remote (`-r`/ssh)
+fan-out is covered against a stubbed `ssh`.
+
+**Colour** is covered as a display layer: off when stdout is not a terminal (which
+is what keeps every other assertion here working on plain bytes), on under
+`CCFIND_COLOR=always`, off again under `-C` or `NO_COLOR`, with the search term
+highlighted inside the snippet. The two helpers the picker leans on —
+`_ccfind_hl` (literal, glob-safe highlighting) and `_ccfind_strip_sgr` — are
+unit-tested directly.
+
+**The picker** is reachable without a terminal because `-i` is the explicit
+"give me the picker", overriding the TTY sniff as well as `CCFIND_INTERACTIVE=0`.
+`install_fzf_stub` shadows `fzf` with a stub that records the rows and the argv
+it is handed and exits 130 (cancelled), so the tests can assert the row contract:
+seven tab-separated fields, colour only in field 7 (the composed display line
+fzf shows via `--with-nth=7`), and fields 1/3/6 — the host, cwd and path the
+resume and preview read back — left plain. The preview pane's rendering is still
+left to manual verification (and to the README-SVG generator, which runs it for
+real).
 
 ## The resume line as a contract
 
