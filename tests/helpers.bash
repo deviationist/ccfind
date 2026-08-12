@@ -80,12 +80,22 @@ install_ssh_stub_real_host() {
   cat > "$REMOTE_CCFIND_DIR/.env" <<ENV
 typeset CCFIND_PROFILES="rwork:$REMOTE_HOME/.claude rpersonal:$REMOTE_HOME/.claude-personal"
 ENV
+  export SSH_LOG="$BATS_TEST_TMPDIR/ssh-log"
   cat > "$BATS_TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
+# ccfind reaches a host three ways. The first two are run for real against the
+# fake remote HOME; the third — a resume — is only recorded, because actually
+# running it would exec an interactive shell.
 cmd=""; for a in "$@"; do cmd="$a"; done       # the remote command is the last arg
+printf '%s
+' "$*" >> "$SSH_LOG"
 cmd="${cmd#CCFIND_REMOTE_PATH=* }"             # drop the caller's hint; we set our own
-exec env HOME="$REMOTE_HOME" CCFIND_REMOTE_PATH="$REMOTE_CCFIND_DIR/ccfind.zsh" \
-     sh -c "$cmd"
+case "$cmd" in
+  *"sh -s"*|cat\ *)
+    exec env HOME="$REMOTE_HOME" CCFIND_REMOTE_PATH="$REMOTE_CCFIND_DIR/ccfind.zsh" \
+         sh -c "$cmd" ;;
+  *) exit 0 ;;                                 # a resume: recorded, not run
+esac
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
@@ -218,4 +228,33 @@ mk_transcript() {
     printf '{"type":"%s","message":{"role":"%s","content":"%s"}}\n' "$role" "$role" "$line" >> "$f"
     [ "$role" = user ] && role=assistant || role=user
   done
+}
+
+# install_fzf_stub_select — an fzf that SELECTS instead of cancelling: it prints
+# the row at $FZF_PICK (default 1) and exits 0, the way fzf does on Enter. That
+# takes ccfind past the picker and into the resume branch, which the cancelling
+# stub never reaches. ANSI is stripped the way `fzf --ansi` strips it, so the
+# row handed back is shaped exactly like the real one.
+install_fzf_stub_select() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  export FZF_PICK="${1:-1}"
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in --version) echo "0.74.2 (stub)"; exit 0 ;; esac
+sed -n "${FZF_PICK}p" | sed $'s/\033\\[[0-9;]*m//g'
+exit 0
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# mk_tabsdir <dir> <view...> — the state directory the tab bindings work over.
+mk_tabsdir() {
+  local d="$1"; shift
+  mkdir -p "$d"
+  printf '%s\n' "$@" > "$d/views"
+  print 1 > "$d/cur" 2>/dev/null || echo 1 > "$d/cur"
+  echo "keys here" > "$d/help"
+  local i=1 v
+  for v in "$@"; do echo "row for $v" > "$d/view-$i.rows"; i=$(( i + 1 )); done
 }

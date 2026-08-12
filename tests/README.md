@@ -36,6 +36,19 @@ highlighted inside the snippet. The two helpers the picker leans on —
 `_ccfind_hl` (literal, glob-safe highlighting) and `_ccfind_strip_sgr` — are
 unit-tested directly.
 
+**The picker's two halves** are both reachable without a terminal. `install_fzf_stub`
+cancels (exit 130), which pins what fzf is *handed*; `install_fzf_stub_select` prints
+a row and exits 0, which takes ccfind into the resume branch — so `Enter` is covered
+end to end, locally and over ssh, against a stub `claude` and a stub `ssh` that
+records the command rather than running it. What `Tab` computes is covered by calling
+`_ccfind_tab_shift` / `_ccfind_tab_header` directly, since both are plain functions
+over a state directory.
+
+What is *not* covered, deliberately: fzf's own rendering and key dispatch — whether
+it really redraws on the action string we hand back. That needs a pty harness
+(tmux-driven, as fzf's own suite does), which would be slow and flaky in CI to test
+someone else's tool. The seam is exactly where ccfind's responsibility ends.
+
 **The picker** is reachable without a terminal because `-i` is the explicit
 "give me the picker", overriding the TTY sniff as well as `CCFIND_INTERACTIVE=0`.
 `install_fzf_stub` shadows `fzf` with a stub that records the rows and the argv
@@ -89,6 +102,10 @@ Guards verified this way, each against the test named beside it:
 | the empty-document guard on no results | `--json` stays well-formed when nothing matched |
 | profile tab views matching on `(local, label)` | tabs: one view per profile and host … (+2 more) |
 | claude-profile discovery | 5 of the 6 discovery tests |
+| pinning the remote seat on a remote resume | Enter on a remote hit goes over ssh … |
+| pinning the local seat on a picker resume | Enter on a profile hit resumes into … |
+| the "cwd is gone" check before resuming | Enter refuses when the session's directory is gone |
+| tab wrap-around | tab_shift wraps around in both directions |
 
 ## The resume line as a contract
 
