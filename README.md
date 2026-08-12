@@ -248,8 +248,10 @@ so nothing costs an extra round trip. An older ccfind that doesn't understand
 `--tsv` exits non-zero and lands in the same fallback, so a fleet mid-upgrade
 degrades rather than breaking.
 
-ccfind is found at `~/ccfind/ccfind.zsh`, `~/.zsh/ccfind/ccfind.zsh` or
-`~/.config/ccfind/ccfind.zsh`; set `CCFIND_REMOTE_PATH` if yours lives elsewhere.
+ccfind is looked for at `$CCFIND_REMOTE_PATH`, then `~/ccfind/ccfind.zsh`,
+`~/.zsh/ccfind/ccfind.zsh`, `~/.config/ccfind/ccfind.zsh` — **every** candidate is
+tried until one answers, so a stale clone left at an old location can't shadow the
+current one. A host only reports itself incompatible when none of them worked.
 `command -v` is no use here — ccfind is a shell *function*, invisible to the
 non-interactive shell the worker runs in — so it is the file that is looked for.
 

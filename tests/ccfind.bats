@@ -889,3 +889,45 @@ print("close" if 0 < lead <= 14 else f"far:{lead}")' <<<"$disp"
   assert_contains "$output" $'\033[2m All \033[0m'      # the others: dimmed
   assert_contains "$output" "keys here"
 }
+
+@test "a stale ccfind at an earlier path does not shadow a working one" {
+  # Found on a real host: a pre-split clone at ~/ccfind sat ahead of the current
+  # one at ~/.zsh/ccfind in the search order, rejected --tsv, and took the whole
+  # machine down to the filesystem walk — reported as "incompatible" while a
+  # perfectly good ccfind sat one path further down.
+  install_ssh_stub_real_host
+  rm -rf "$REMOTE_CCFIND_DIR"                     # no CCFIND_REMOTE_PATH hint
+  mkdir -p "$REMOTE_HOME/ccfind" "$REMOTE_HOME/.zsh/ccfind"
+  cat > "$REMOTE_HOME/ccfind/ccfind.zsh" <<'STALE'
+# a clone from before --tsv existed
+function ccfind() { print -u2 "ccfind: unknown option $1"; return 2 }
+STALE
+  cp "$CCFIND_SRC" "$REMOTE_HOME/.zsh/ccfind/ccfind.zsh"
+  cat > "$REMOTE_HOME/.zsh/ccfind/.env" <<ENV
+typeset CCFIND_PROFILES="rwork:$REMOTE_HOME/.claude"
+ENV
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  run_ccfind -H nas -N -v termx
+  assert_equal "$status" 0
+  assert_contains "$output" "searched with its own ccfind"   # the later path answered
+  assert_contains "$output" "nas:rwork:/srv/app"             # under the host's own label
+  refute_contains "$output" "incompatible"
+}
+
+@test "incompatible means every candidate was tried" {
+  # Both paths hold something too old, so there is genuinely nothing to talk to.
+  install_ssh_stub_real_host
+  rm -rf "$REMOTE_CCFIND_DIR"
+  mkdir -p "$REMOTE_HOME/ccfind" "$REMOTE_HOME/.zsh/ccfind"
+  local d
+  for d in "$REMOTE_HOME/ccfind" "$REMOTE_HOME/.zsh/ccfind"; do
+    cat > "$d/ccfind.zsh" <<'STALE'
+function ccfind() { print -u2 "ccfind: unknown option $1"; return 2 }
+STALE
+  done
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  run_ccfind -H nas -N -v termx
+  assert_equal "$status" 0
+  assert_contains "$output" "no usable ccfind (incompatible)"
+  assert_contains "$output" "nas:/srv/app"        # still searched, the old way
+}
