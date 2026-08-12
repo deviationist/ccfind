@@ -15,6 +15,8 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
+  -v           note on stderr what each remote host was searched with
+  -j | --tsv   machine output: JSON document / raw tab-separated records
   -r           also search CCFIND_HOSTS over ssh   (alias: ccfindr = ccfind -r)
   -H "<hosts>" search an explicit ssh-alias list (implies remote)
   -l           force local only (trumps -r / -H)
@@ -31,8 +33,27 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   merge newest-first with a host column; resume becomes `ssh -t <host> 'cd <cwd> &&
   exec "$SHELL" -ic claude --resume <id>'`. Host precedence: `-H` > env `CCFIND_HOSTS`
   > `.env`. Unreachable host = one stderr line, rest still show.
-- **Multi-profile (`CCFIND_PROFILES="label:configdir ..."`):** unions several local
-  Claude config dirs, tags each hit with its label. `ccfind foo` = all profiles;
+- **Remote profiles:** the worker looks for a ccfind ON the host (`$CCFIND_REMOTE_PATH`,
+  `~/ccfind/ccfind.zsh`, `~/.zsh/…`, `~/.config/…` — `command -v` can't see a shell
+  function) and runs `ccfind --tsv -l` there, so that host's own `.env` decides its
+  profiles; hits tag `<host>:<profile>` and resume pins that host's `CLAUDE_CONFIG_DIR`.
+  No ccfind (or one too old for `--tsv`, which exits non-zero) → the filesystem walk,
+  default profile only, quiet; `-v` reports which path each host took. Both live in
+  ONE connection — a capability probe would double the ssh cost. The remote call
+  `unset`s inherited `CCFIND_*` so only the host's config applies.
+- **Machine output:** `--json` (envelope: version/query/scope/total/shown/truncated/
+  results[]) and `--tsv` (the wire record, host column dropped — the caller knows the
+  alias it dialled). Both imply no picker and no colour, and stay well-formed with
+  zero results: a sentence where a document belongs would be parsed as a record.
+- **Multi-profile — two sources, checked in order:** `CCFIND_PROFILES="label:dir …"`
+  (env or `.env`), else **claude-profile** (`claude-profile list`, its stable
+  `name<TAB>dir[<TAB>active]` porcelain; found as command/function, else
+  `python3 <path>/claude-profile.py` at `$CCFIND_PROFILE_PATH` / `~/claude-profile/`
+  / `~/.zsh/claude-profile/` / `~/.config/claude-profile/`; `$CCFIND_PROFILE_CMD`
+  overrides). A profile whose dir is absent here is skipped, so shared config
+  degrades per machine. Neither → single nameless `~/.claude`. `-v` names the source.
+  Both work on remote hosts too, since the host runs its own ccfind and resolves its
+  own seats. Unions the dirs, tags each hit with its label. `ccfind foo` = all profiles;
   `ccfind <label> foo` / `-p <label>` = one. Resume runs under that profile
   (`CLAUDE_CONFIG_DIR=<dir> claude --resume`). Unset → single `~/.claude` (unchanged).
 - **Colour:** roles, not decoration — cyan = local profile label, magenta = remote
@@ -56,6 +77,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
 | `CCFIND_INTERACTIVE` | 1 | `0` → default to flat list |
 | `CCFIND_COLOR` | auto | `always` / `never`; auto = colour only on a terminal |
+| `CCFIND_REMOTE_PATH` | unset | where ccfind lives on remote hosts, if unconventional |
 
 ## Conventions
 
@@ -63,6 +85,12 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 - `.env` is sourced inside function scope with the keys pre-`typeset`ed local, so it
   never leaks into the interactive shell.
 - Portable across macOS (BSD `stat`) and Linux (GNU `stat`); no bashisms.
-- Tests: `tests/run.sh` (bats; flat-list path, so no fzf/ssh/TTY needed). README
+- Record schema (internal): `epoch \t host \t profile \t cfgdir \t id \t cwd \t ts \t
+  snippet \t path`; the picker appends a 10th composed display field and shows only
+  that (`--with-nth=9` on the row, epoch stripped). Colour lives in the display field
+  ONLY — the data fields must stay parseable.
+- Tests: `tests/run.sh` (bats; flat-list path, so no fzf/ssh/TTY needed). **Assert via
+  `assert_contains`/`refute_contains`/`assert_equal`, never a bare `[[ … ]]`** — a
+  false `[[ … ]]` mid-test does not fail a bats test (only a trailing one, or `[ … ]`). README
   images: `zsh tools/generate-readme-svg.zsh` — hermetic sandbox + stub `fzf`/`ssh`,
   runs the real tool with `CCFIND_COLOR=always`; commit the SVGs with the README.
