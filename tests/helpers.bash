@@ -80,12 +80,22 @@ install_ssh_stub_real_host() {
   cat > "$REMOTE_CCFIND_DIR/.env" <<ENV
 typeset CCFIND_PROFILES="rwork:$REMOTE_HOME/.claude rpersonal:$REMOTE_HOME/.claude-personal"
 ENV
+  export SSH_LOG="$BATS_TEST_TMPDIR/ssh-log"
   cat > "$BATS_TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
+# ccfind reaches a host three ways. The first two are run for real against the
+# fake remote HOME; the third — a resume — is only recorded, because actually
+# running it would exec an interactive shell.
 cmd=""; for a in "$@"; do cmd="$a"; done       # the remote command is the last arg
+printf '%s
+' "$*" >> "$SSH_LOG"
 cmd="${cmd#CCFIND_REMOTE_PATH=* }"             # drop the caller's hint; we set our own
-exec env HOME="$REMOTE_HOME" CCFIND_REMOTE_PATH="$REMOTE_CCFIND_DIR/ccfind.zsh" \
-     sh -c "$cmd"
+case "$cmd" in
+  *"sh -s"*|cat\ *)
+    exec env HOME="$REMOTE_HOME" CCFIND_REMOTE_PATH="$REMOTE_CCFIND_DIR/ccfind.zsh" \
+         sh -c "$cmd" ;;
+  *) exit 0 ;;                                 # a resume: recorded, not run
+esac
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
@@ -127,10 +137,22 @@ run_resume() {
 install_fzf_stub() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   export FZF_ROWS="$BATS_TEST_TMPDIR/fzf-rows" FZF_ARGV="$BATS_TEST_TMPDIR/fzf-argv"
+  export FZF_TABS="$BATS_TEST_TMPDIR/fzf-tabs"
   cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in --version) echo "0.74.2 (stub)"; exit 0 ;; esac
 printf '%s\n' "$@" > "$FZF_ARGV"
+# Snapshot the tab-view state directory while it still exists: ccfind builds it
+# in a temp dir wiped by the trap when the function returns, so a test can only
+# see it from in here. Its path is in the Tab keybinding ccfind passes us.
+for a in "$@"; do
+  case "$a" in
+    *_ccfind_tab_shift*)
+      d="${a#*_ccfind_tab_shift }"; d="${d%% *}"; d="${d%\'}"; d="${d#\'}"
+      [ -d "$d" ] && cp -R "$d" "$FZF_TABS"
+      break ;;
+  esac
+done
 cat > "$FZF_ROWS"
 exit 130
 STUB
@@ -183,4 +205,56 @@ printf 'client\t%s/.claude-work\tactive\n' "$HOME"
 STUB
   chmod +x "$bindir/claude-profile"
   export PATH="$bindir:$PATH"
+}
+
+# run_preview <host> <file> [query] — render the fzf preview pane for a
+# transcript, the way the picker's --preview command does (its own zsh, sourcing
+# ccfind.zsh and calling the function directly).
+run_preview() {
+  run env HOME="$FIXHOME" CCFIND_PV_QUERY="${3-}" CCFIND_PV_CACHE="$BATS_TEST_TMPDIR" \
+      CCFIND_LOCAL_LABELS="local" \
+      zsh -fc 'src=$1; shift; source "$src"; _ccfind_preview "$@"' _ "$CCFIND_ZSH" "$1" "$2"
+}
+
+# mk_transcript <file> <lines...> — a transcript with real message records, for
+# the preview to render. mk_session writes one searchable line; this writes a
+# conversation.
+mk_transcript() {
+  local f="$1"; shift
+  mkdir -p "${f%/*}"
+  : > "$f"
+  local role=user line
+  for line in "$@"; do
+    printf '{"type":"%s","message":{"role":"%s","content":"%s"}}\n' "$role" "$role" "$line" >> "$f"
+    [ "$role" = user ] && role=assistant || role=user
+  done
+}
+
+# install_fzf_stub_select — an fzf that SELECTS instead of cancelling: it prints
+# the row at $FZF_PICK (default 1) and exits 0, the way fzf does on Enter. That
+# takes ccfind past the picker and into the resume branch, which the cancelling
+# stub never reaches. ANSI is stripped the way `fzf --ansi` strips it, so the
+# row handed back is shaped exactly like the real one.
+install_fzf_stub_select() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  export FZF_PICK="${1:-1}"
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in --version) echo "0.74.2 (stub)"; exit 0 ;; esac
+sed -n "${FZF_PICK}p" | sed $'s/\033\\[[0-9;]*m//g'
+exit 0
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# mk_tabsdir <dir> <view...> — the state directory the tab bindings work over.
+mk_tabsdir() {
+  local d="$1"; shift
+  mkdir -p "$d"
+  printf '%s\n' "$@" > "$d/views"
+  print 1 > "$d/cur" 2>/dev/null || echo 1 > "$d/cur"
+  echo "keys here" > "$d/help"
+  local i=1 v
+  for v in "$@"; do echo "row for $v" > "$d/view-$i.rows"; i=$(( i + 1 )); done
 }

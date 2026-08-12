@@ -36,6 +36,19 @@ highlighted inside the snippet. The two helpers the picker leans on —
 `_ccfind_hl` (literal, glob-safe highlighting) and `_ccfind_strip_sgr` — are
 unit-tested directly.
 
+**The picker's two halves** are both reachable without a terminal. `install_fzf_stub`
+cancels (exit 130), which pins what fzf is *handed*; `install_fzf_stub_select` prints
+a row and exits 0, which takes ccfind into the resume branch — so `Enter` is covered
+end to end, locally and over ssh, against a stub `claude` and a stub `ssh` that
+records the command rather than running it. What `Tab` computes is covered by calling
+`_ccfind_tab_shift` / `_ccfind_tab_header` directly, since both are plain functions
+over a state directory.
+
+What is *not* covered, deliberately: fzf's own rendering and key dispatch — whether
+it really redraws on the action string we hand back. That needs a pty harness
+(tmux-driven, as fzf's own suite does), which would be slow and flaky in CI to test
+someone else's tool. The seam is exactly where ccfind's responsibility ends.
+
 **The picker** is reachable without a terminal because `-i` is the explicit
 "give me the picker", overriding the TTY sniff as well as `CCFIND_INTERACTIVE=0`.
 `install_fzf_stub` shadows `fzf` with a stub that records the rows and the argv
@@ -69,6 +82,30 @@ While writing a test, check it can actually fail. Break the thing it guards and
 watch it go red; a test that passes either way reads like coverage and is worse than
 none. The no-second-hop test in this suite is written the way it is for exactly that
 reason — the obvious version of it passed even with the guard removed.
+
+That check is cheap to run deliberately. Edit one guard in `ccfind.zsh`, run just
+the test that covers it, and confirm it fails:
+
+```sh
+bats -f "follow the search onto a host" tests/ccfind.bats
+```
+
+Guards verified this way, each against the test named beside it:
+
+| guard removed | test that catches it |
+|---|---|
+| the `unset CCFIND_*` before the remote ccfind call | the caller's `CCFIND_*` does not follow the search onto a host |
+| exit-status check on the remote ccfind | a remote ccfind too old for `--tsv` falls back instead of erroring |
+| `-d` forwarding to the remote | `-d` scopes the remote search too |
+| `$HOME` contraction in the display column | the display column contracts `$HOME` … |
+| pulling the snippet window to the match | the display column leads with the match … |
+| the empty-document guard on no results | `--json` stays well-formed when nothing matched |
+| profile tab views matching on `(local, label)` | tabs: one view per profile and host … (+2 more) |
+| claude-profile discovery | 5 of the 6 discovery tests |
+| pinning the remote seat on a remote resume | Enter on a remote hit goes over ssh … |
+| pinning the local seat on a picker resume | Enter on a profile hit resumes into … |
+| the "cwd is gone" check before resuming | Enter refuses when the session's directory is gone |
+| tab wrap-around | tab_shift wraps around in both directions |
 
 ## The resume line as a contract
 
