@@ -35,7 +35,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   > `.env`. Unreachable host = one stderr line, rest still show.
 - **Remote profiles:** the worker looks for a ccfind ON the host (`$CCFIND_REMOTE_PATH`,
   `~/ccfind/ccfind.zsh`, `~/.zsh/…`, `~/.config/…` — `command -v` can't see a shell
-  function) and runs `ccfind --tsv -l` there, so that host's own `.env` decides its
+  function) and runs `ccfind --tsv -l` there — **every** candidate is tried until one answers, so a stale clone at an earlier path can't shadow a current one, so that host's own `.env` decides its
   profiles; hits tag `<host>:<profile>` and resume pins that host's `CLAUDE_CONFIG_DIR`.
   No ccfind (or one too old for `--tsv`, which exits non-zero) → the filesystem walk,
   default profile only, quiet; `-v` reports which path each host took. Both live in
