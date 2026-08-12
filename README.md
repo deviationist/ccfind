@@ -10,7 +10,7 @@ session is a `.jsonl` transcript under
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
 <div align="center">
-  <img src="assets/demo-f991f0.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+  <img src="assets/demo-90518b.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
 </div>
 
 ## Install
@@ -49,6 +49,8 @@ ccfind -l <text...>                # force local only (trumps -r / -H)
 ccfind <profile> <text...>         # scope local search to one CCFIND_PROFILES profile
 ccfind -p <profile> <text...>      # same, explicit form
 ccfind -C <text...>                # no colour (also: NO_COLOR=1, CCFIND_COLOR=never)
+ccfind -v <text...>                # note on stderr what each host was searched with
+ccfind -j <text...>                # print the hits as JSON (--tsv for the raw records)
 ```
 
 ### Interactive picker (default)
@@ -59,7 +61,7 @@ profile or host it belongs to, its working directory, and the matching text with
 search term picked out.
 
 <div align="center">
-  <img src="assets/picker-f991f0.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+  <img src="assets/picker-90518b.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
 </div>
 
 | Key | Action |
@@ -78,7 +80,7 @@ before committing to one. On a remote hit the transcript is fetched over ssh on
 demand (once per session, then cached for as long as the picker is open):
 
 <div align="center">
-  <img src="assets/preview-f991f0.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+  <img src="assets/preview-90518b.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
 </div>
 
 ### Flat-list fallback
@@ -91,7 +93,7 @@ when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`
 `CCFIND_INTERACTIVE=0` is set.
 
 <div align="center">
-  <img src="assets/list-f991f0.svg" alt="the ccfind flat list: each hit as a timestamp and profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+  <img src="assets/list-90518b.svg" alt="the ccfind flat list: each hit as a timestamp and profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
 </div>
 
 ```zsh
@@ -125,20 +127,45 @@ the same bytes they did before. To force the question:
 | `CCFIND_COLOR=never` | plain |
 | `CCFIND_COLOR=always` | coloured even when piped (what the README images use) |
 
-## Multi-profile search (opt-in)
+## Multi-profile search
 
 If you run Claude Code under more than one config dir — e.g. separate work and
-personal accounts (`CLAUDE_CONFIG_DIR`) — point `CCFIND_PROFILES` at them and
-`ccfind` searches all of them at once, tagging each hit with its profile:
+personal accounts (`CLAUDE_CONFIG_DIR`) — `ccfind` searches all of them at once and
+tags each hit with its profile. There are two ways to be multi-profile, and both
+count:
+
+**1. Tell ccfind** — space/comma-separated `label:configdir` pairs, where
+`<configdir>` is the Claude config dir (the one containing a `projects/` subdir).
+Order sets the tab order:
 
 ```zsh
 # .env beside ccfind.zsh  (or export from ~/.zshrc)
 typeset CCFIND_PROFILES="work:$HOME/.claude personal:$HOME/.claude-personal"
 ```
 
-Format: space/comma-separated `label:configdir` pairs, where `<configdir>` is the
-Claude config dir (the one containing a `projects/` subdir). Order sets the tab
-order. Unset → a single `~/.claude` profile, exactly the previous behavior.
+**2. Use [claude-profile](https://github.com/deviationist/claude-profile)** — if it
+manages the seats on this machine, it already knows them, and writing them out again
+here would be a second copy that drifts. When `CCFIND_PROFILES` is unset, ccfind asks
+it (`claude-profile list`, its stable porcelain) and uses what it reports. Nothing to
+configure: install both and multi-profile is simply on.
+
+Explicit config wins — set `CCFIND_PROFILES` and claude-profile is not consulted at
+all. Either way, a profile is only used if its dir actually exists here, so one
+`.env` (or one claude-profile config) shared across a fleet degrades per machine
+rather than inventing seats. Neither → a single nameless `~/.claude` profile, exactly
+the behaviour before any of this existed.
+
+`ccfind -v` says which of the two it used:
+
+```
+ccfind: profiles: claude-profile → work, personal
+```
+
+> **Upgrading with claude-profile installed:** searches that used to cover `~/.claude`
+> only will now cover every seat, and each hit's resume line will pin its own
+> `CLAUDE_CONFIG_DIR`. That is the point — a session reopens in the seat it belongs
+> to — but it does mean claude-profile's own launch-time path-rule routing no longer
+> applies to a resume, since the seat is already decided by the hit.
 
 - **Union by default.** `ccfind foo` searches every configured profile; hits show a
   `work:` / `personal:` column (picker) or prefix (flat list).
@@ -152,7 +179,8 @@ order. Unset → a single `~/.claude` profile, exactly the previous behavior.
   reopens on the personal account regardless of where you launched `ccfind`.
 - **Profiles + hosts compose.** With both `CCFIND_PROFILES` and `CCFIND_HOSTS` set,
   `ccfindr foo` searches every local profile *and* every remote host; tabs become
-  `All │ work │ personal │ <host>…`.
+  `All │ work │ personal │ <host>…`. Remote hosts have profiles of their own — see
+  **Profiles on remote hosts** below.
 
 ## Multi-host search (opt-in per call)
 
@@ -195,6 +223,83 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
   *locally* and matched as-is on each host — useful when the path exists on the
   hosts, a no-op filter otherwise.
 
+### Profiles on remote hosts
+
+A remote host can have several Claude profiles too, and only that host knows what
+they are. So when the worker lands, it looks for a ccfind **on that host** and asks
+it, instead of guessing:
+
+- **Host has ccfind** → the worker runs `ccfind --tsv -l` there. That reads the
+  host's *own* `.env`, so its profiles are searched under its own labels, and hits
+  come back tagged `<host>:<profile>` (`nas:media`). Resuming one runs
+  `CLAUDE_CONFIG_DIR=<that host's dir> claude --resume …` over ssh, so it reopens in
+  the right seat on the far end.
+- **Host has no ccfind** → the worker walks `~/.claude/projects` exactly as it always
+  did. That host contributes its **default profile only**; any other seat on it is
+  invisible. This is a quiet fallback, not an error — `-v` reports it:
+
+  ```
+  ccfind: nas — no usable ccfind (not-installed); searched ~/.claude only,
+          so any other profile on that host is invisible
+  ```
+
+Both happen in a single connection — the worker tries ccfind and falls back inline,
+so nothing costs an extra round trip. An older ccfind that doesn't understand
+`--tsv` exits non-zero and lands in the same fallback, so a fleet mid-upgrade
+degrades rather than breaking.
+
+ccfind is found at `~/ccfind/ccfind.zsh`, `~/.zsh/ccfind/ccfind.zsh` or
+`~/.config/ccfind/ccfind.zsh`; set `CCFIND_REMOTE_PATH` if yours lives elsewhere.
+`command -v` is no use here — ccfind is a shell *function*, invisible to the
+non-interactive shell the worker runs in — so it is the file that is looked for.
+
+**Both ways of being multi-profile work out there**, because the host runs its own
+ccfind and answers for itself: its `.env`, or its claude-profile (looked for at
+`~/claude-profile/claude-profile.py`, `~/.zsh/…`, `~/.config/…`, or
+`CCFIND_PROFILE_PATH` in its own `.env`). What will *not* work is an export in that
+host's `~/.zshrc` — the worker deliberately runs `zsh -f`, skipping rc files, and
+drops any `CCFIND_*` that leaked from the caller so the host's own config is the only
+one in play.
+
+## Machine-readable output
+
+`-j`/`--json` prints the hits as one JSON document instead of a list:
+
+```zsh
+ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
+```
+
+```json
+{
+  "version": 1,
+  "query": "connection refused",
+  "scope": "",
+  "total": 6,
+  "shown": 6,
+  "truncated": false,
+  "results": [
+    {
+      "epoch": 1786520941, "host": "nas", "profile": "media",
+      "config_dir": "/home/you/.claude-media", "id": "e5710b93",
+      "cwd": "/srv/backup", "mtime": "2026-08-12 08:17:41",
+      "snippet": "…", "path": "/home/you/.claude-media/projects/-srv-backup/e5710b93.jsonl"
+    }
+  ]
+}
+```
+
+`host` is `local` or the ssh alias; `profile` is empty on a machine with no profiles
+configured; `config_dir` is the dir that hit belongs to, *on that machine*, which is
+what a consumer needs to resume it into the right seat. The document is well-formed
+even when nothing matched (`"results": []`) — and JSON output never opens the picker
+and is never coloured, whatever else is set.
+
+`--tsv` prints the same records tab-separated, one per line, without the `host`
+column: `epoch, profile, config_dir, id, cwd, mtime, snippet, path`. That is the
+format ccfind speaks to itself over ssh (see **Profiles on remote hosts**), and it
+is stable enough to script against — no escaping to undo, since tabs and control
+characters are stripped from snippets.
+
 ### Custom remote resume (tmux, screen, mosh, …)
 
 By default, resuming a remote hit runs
@@ -236,7 +341,7 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 local-only runs, or when `CCFIND_TABS` is unset.
 
 <div align="center">
-  <img src="assets/tabs-f991f0.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+  <img src="assets/tabs-90518b.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
 </div>
 
 ## Notes
@@ -259,6 +364,9 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_PROFILES` | *(unset)* | Space/comma-separated `label:configdir` pairs → search multiple local Claude profiles. Unset = just `~/.claude`. |
 | `CCFIND_HOSTS` | *(unset)* | Space/comma-separated ssh aliases for `-r`/`ccfindr`. Env or `.env`. |
 | `CCFIND_REMOTE_RESUME` | *(unset)* | Command/function to resume a remote hit: called as `<cmd> <host> <cwd> <id>` instead of the built-in ssh (wrap in tmux/screen, etc.). |
+| `CCFIND_REMOTE_PATH` | *(unset)* | Where ccfind lives on the remote hosts, if not one of the conventional paths. Enables remote multi-profile. |
+| `CCFIND_PROFILE_PATH` | *(unset)* | Where `claude-profile.py` lives, if not one of the conventional paths. Only consulted when `CCFIND_PROFILES` is unset. |
+| `CCFIND_PROFILE_CMD` | *(unset)* | Command to ask for the profile list instead of `claude-profile` (called as `<cmd> list`, expecting `label<TAB>dir` lines). |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |
