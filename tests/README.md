@@ -70,6 +70,26 @@ watch it go red; a test that passes either way reads like coverage and is worse 
 none. The no-second-hop test in this suite is written the way it is for exactly that
 reason — the obvious version of it passed even with the guard removed.
 
+That check is cheap to run deliberately. Edit one guard in `ccfind.zsh`, run just
+the test that covers it, and confirm it fails:
+
+```sh
+bats -f "follow the search onto a host" tests/ccfind.bats
+```
+
+Guards verified this way, each against the test named beside it:
+
+| guard removed | test that catches it |
+|---|---|
+| the `unset CCFIND_*` before the remote ccfind call | the caller's `CCFIND_*` does not follow the search onto a host |
+| exit-status check on the remote ccfind | a remote ccfind too old for `--tsv` falls back instead of erroring |
+| `-d` forwarding to the remote | `-d` scopes the remote search too |
+| `$HOME` contraction in the display column | the display column contracts `$HOME` … |
+| pulling the snippet window to the match | the display column leads with the match … |
+| the empty-document guard on no results | `--json` stays well-formed when nothing matched |
+| profile tab views matching on `(local, label)` | tabs: one view per profile and host … (+2 more) |
+| claude-profile discovery | 5 of the 6 discovery tests |
+
 ## The resume line as a contract
 
 ccfind's real output is a *command*, and in practice it is handed to
