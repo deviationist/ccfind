@@ -46,6 +46,30 @@ resume and preview read back — left plain. The preview pane's rendering is sti
 left to manual verification (and to the README-SVG generator, which runs it for
 real).
 
+## Assertions: never a bare `[[ … ]]`
+
+Use `assert_contains` / `refute_contains` / `assert_equal` from `helpers.bash`.
+
+A false `[[ … ]]` in the **middle** of a bats test does not fail it. Only the last
+command in the body is checked, and a plain `[ … ]` fails because it is an ordinary
+command — but `[[ … ]]` mid-body is silently ignored. Verified against bats 1.13:
+
+```bash
+@test "false [[ ]] in the middle" { true; [[ x == y ]]; true; }   # → ok    (!)
+@test "false [[ ]] at the end"    { true; [[ x == y ]]; }         # → not ok
+@test "false [ ] in the middle"   { true; [ x = y ]; true; }      # → not ok
+```
+
+This was not theoretical here: two remote tests reported `ok` for months against
+output whose fields had shifted, because their `[[ … ]]` assertions were decorative.
+The helpers are functions, so a failure really does fail the test — and each prints
+what it expected against what it got.
+
+While writing a test, check it can actually fail. Break the thing it guards and
+watch it go red; a test that passes either way reads like coverage and is worse than
+none. The no-second-hop test in this suite is written the way it is for exactly that
+reason — the obvious version of it passed even with the guard removed.
+
 ## The resume line as a contract
 
 ccfind's real output is a *command*, and in practice it is handed to

@@ -43,19 +43,59 @@ run_ccfind() {
   run env HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' _ "$CCFIND_ZSH" "$@"
 }
 
-# install_ssh_stub — shadow `ssh` with a stub that emulates ccfind's remote
-# worker (one TSV hit regardless of args), so the remote (-r/-H) code path is
-# exercisable without a real host. ccfind calls `command ssh`, which honors PATH.
+# install_ssh_stub — shadow `ssh` with a stub that answers as a host WITHOUT
+# ccfind: the worker's fallback header, then one record in the wire format.
+# ccfind calls `command ssh`, which honors PATH.
 install_ssh_stub() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
-# worker output: epoch \t id \t cwd \t ts \t snippet \t path
-printf '1700000000\tRID123\t/remote/proj\t2024-01-01 12:00:00\tremote snippet\t/remote/proj/RID123.jsonl\n'
+# header, then: epoch \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path
+# No ccfind on this host, so the profile column is empty — one nameless seat.
+printf '#ccfind mode=fallback reason=not-installed\n'
+printf '1700000000\t\t/root/.claude\tRID123\t/remote/proj\t2024-01-01 12:00:00\tremote snippet\t/remote/proj/RID123.jsonl\n'
 exit 0
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# install_ssh_stub_real_host — shadow `ssh` with a stub that runs the remote
+# command locally against a fake remote $HOME, with a real copy of ccfind.zsh
+# installed there. Nothing is canned: the worker script really does go over
+# "the wire" on stdin, really does find that ccfind, and the records really are
+# produced by its --tsv emitter. So this exercises BOTH sides of the protocol —
+# which is the only way the wire format is actually pinned, since caller and
+# host are two different copies of this tool.
+#
+# Sets REMOTE_HOME (with the two profiles seeded) for the test to write into.
+install_ssh_stub_real_host() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  export REMOTE_HOME="$BATS_TEST_TMPDIR/remote-home"
+  export REMOTE_CCFIND_DIR="$BATS_TEST_TMPDIR/remote-ccfind"
+  mkdir -p "$REMOTE_HOME" "$REMOTE_CCFIND_DIR"
+  cp "$CCFIND_SRC" "$REMOTE_CCFIND_DIR/ccfind.zsh"
+  # The host's own profile config, where a real install keeps it: a .env beside
+  # the script. This is the thing the caller cannot know and must ask for.
+  cat > "$REMOTE_CCFIND_DIR/.env" <<ENV
+typeset CCFIND_PROFILES="rwork:$REMOTE_HOME/.claude rpersonal:$REMOTE_HOME/.claude-personal"
+ENV
+  cat > "$BATS_TEST_TMPDIR/bin/ssh" <<'STUB'
+#!/usr/bin/env bash
+cmd=""; for a in "$@"; do cmd="$a"; done       # the remote command is the last arg
+cmd="${cmd#CCFIND_REMOTE_PATH=* }"             # drop the caller's hint; we set our own
+exec env HOME="$REMOTE_HOME" CCFIND_REMOTE_PATH="$REMOTE_CCFIND_DIR/ccfind.zsh" \
+     sh -c "$cmd"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# install_ssh_stub_bare_host — the same, but with no ccfind installed on the
+# far end, so the worker takes its filesystem-walk fallback for real.
+install_ssh_stub_bare_host() {
+  install_ssh_stub_real_host
+  rm -rf "$REMOTE_CCFIND_DIR"
 }
 
 # install_claude_stub — shadow `claude` with a stub that reports the argv and
@@ -96,4 +136,33 @@ exit 130
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# --- assertions -------------------------------------------------------------
+# Use these rather than a bare `[[ … ]]`. A false `[[ … ]]` in the MIDDLE of a
+# bats test does not fail it — only the last command in the body, or a plain
+# `[ … ]`, is checked — so every mid-test `[[ … ]]` in this suite was silently
+# decorative until it was the final line. (Verified against bats 1.13: a false
+# `[[ x == y ]]` mid-body reports ok; the same as a helper function reports not
+# ok.) These are functions, so a failure really does fail the test, and each
+# one prints what it wanted and what it got.
+assert_contains() {   # <haystack> <needle>
+  case "$1" in *"$2"*) return 0 ;; esac
+  printf 'expected output to contain:\n  %s\nactual output:\n%s\n' "$2" "$1" >&2
+  return 1
+}
+
+refute_contains() {   # <haystack> <needle>
+  case "$1" in
+    *"$2"*)
+      printf 'expected output NOT to contain:\n  %s\nactual output:\n%s\n' "$2" "$1" >&2
+      return 1 ;;
+  esac
+  return 0
+}
+
+assert_equal() {      # <actual> <expected>
+  [ "$1" = "$2" ] && return 0
+  printf 'expected: %s\nactual:   %s\n' "$2" "$1" >&2
+  return 1
 }
