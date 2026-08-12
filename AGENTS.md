@@ -52,6 +52,8 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   / `~/.zsh/claude-profile/` / `~/.config/claude-profile/`; `$CCFIND_PROFILE_CMD`
   overrides). A profile whose dir is absent here is skipped, so shared config
   degrades per machine. Neither → single nameless `~/.claude`. `-v` names the source.
+  NB a profile is a config *dir*; claude-profile's *accounts* (subscriptions sharing
+  one dir) are invisible here and not ccfind's concern — sessions are per-dir.
   Both work on remote hosts too, since the host runs its own ccfind and resolves its
   own seats. Unions the dirs, tags each hit with its label. `ccfind foo` = all profiles;
   `ccfind <label> foo` / `-p <label>` = one. Resume runs under that profile
