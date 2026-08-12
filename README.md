@@ -127,20 +127,45 @@ the same bytes they did before. To force the question:
 | `CCFIND_COLOR=never` | plain |
 | `CCFIND_COLOR=always` | coloured even when piped (what the README images use) |
 
-## Multi-profile search (opt-in)
+## Multi-profile search
 
 If you run Claude Code under more than one config dir — e.g. separate work and
-personal accounts (`CLAUDE_CONFIG_DIR`) — point `CCFIND_PROFILES` at them and
-`ccfind` searches all of them at once, tagging each hit with its profile:
+personal accounts (`CLAUDE_CONFIG_DIR`) — `ccfind` searches all of them at once and
+tags each hit with its profile. There are two ways to be multi-profile, and both
+count:
+
+**1. Tell ccfind** — space/comma-separated `label:configdir` pairs, where
+`<configdir>` is the Claude config dir (the one containing a `projects/` subdir).
+Order sets the tab order:
 
 ```zsh
 # .env beside ccfind.zsh  (or export from ~/.zshrc)
 typeset CCFIND_PROFILES="work:$HOME/.claude personal:$HOME/.claude-personal"
 ```
 
-Format: space/comma-separated `label:configdir` pairs, where `<configdir>` is the
-Claude config dir (the one containing a `projects/` subdir). Order sets the tab
-order. Unset → a single `~/.claude` profile, exactly the previous behavior.
+**2. Use [claude-profile](https://github.com/deviationist/claude-profile)** — if it
+manages the seats on this machine, it already knows them, and writing them out again
+here would be a second copy that drifts. When `CCFIND_PROFILES` is unset, ccfind asks
+it (`claude-profile list`, its stable porcelain) and uses what it reports. Nothing to
+configure: install both and multi-profile is simply on.
+
+Explicit config wins — set `CCFIND_PROFILES` and claude-profile is not consulted at
+all. Either way, a profile is only used if its dir actually exists here, so one
+`.env` (or one claude-profile config) shared across a fleet degrades per machine
+rather than inventing seats. Neither → a single nameless `~/.claude` profile, exactly
+the behaviour before any of this existed.
+
+`ccfind -v` says which of the two it used:
+
+```
+ccfind: profiles: claude-profile → work, personal
+```
+
+> **Upgrading with claude-profile installed:** searches that used to cover `~/.claude`
+> only will now cover every seat, and each hit's resume line will pin its own
+> `CLAUDE_CONFIG_DIR`. That is the point — a session reopens in the seat it belongs
+> to — but it does mean claude-profile's own launch-time path-rule routing no longer
+> applies to a resume, since the seat is already decided by the hit.
 
 - **Union by default.** `ccfind foo` searches every configured profile; hits show a
   `work:` / `personal:` column (picker) or prefix (flat list).
@@ -227,10 +252,14 @@ ccfind is found at `~/ccfind/ccfind.zsh`, `~/.zsh/ccfind/ccfind.zsh` or
 `~/.config/ccfind/ccfind.zsh`; set `CCFIND_REMOTE_PATH` if yours lives elsewhere.
 `command -v` is no use here — ccfind is a shell *function*, invisible to the
 non-interactive shell the worker runs in — so it is the file that is looked for.
-The host's profiles must be configured in the `.env` beside that file (an export in
-its `~/.zshrc` won't do: the worker deliberately runs `zsh -f`, skipping rc files,
-and drops any `CCFIND_*` that leaked from the caller so the host's own config is
-the only one in play).
+
+**Both ways of being multi-profile work out there**, because the host runs its own
+ccfind and answers for itself: its `.env`, or its claude-profile (looked for at
+`~/claude-profile/claude-profile.py`, `~/.zsh/…`, `~/.config/…`, or
+`CCFIND_PROFILE_PATH` in its own `.env`). What will *not* work is an export in that
+host's `~/.zshrc` — the worker deliberately runs `zsh -f`, skipping rc files, and
+drops any `CCFIND_*` that leaked from the caller so the host's own config is the only
+one in play.
 
 ## Machine-readable output
 
@@ -336,6 +365,8 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_HOSTS` | *(unset)* | Space/comma-separated ssh aliases for `-r`/`ccfindr`. Env or `.env`. |
 | `CCFIND_REMOTE_RESUME` | *(unset)* | Command/function to resume a remote hit: called as `<cmd> <host> <cwd> <id>` instead of the built-in ssh (wrap in tmux/screen, etc.). |
 | `CCFIND_REMOTE_PATH` | *(unset)* | Where ccfind lives on the remote hosts, if not one of the conventional paths. Enables remote multi-profile. |
+| `CCFIND_PROFILE_PATH` | *(unset)* | Where `claude-profile.py` lives, if not one of the conventional paths. Only consulted when `CCFIND_PROFILES` is unset. |
+| `CCFIND_PROFILE_CMD` | *(unset)* | Command to ask for the profile list instead of `claude-profile` (called as `<cmd> list`, expecting `label<TAB>dir` lines). |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |

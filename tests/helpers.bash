@@ -166,3 +166,21 @@ assert_equal() {      # <actual> <expected>
   printf 'expected: %s\nactual:   %s\n' "$2" "$1" >&2
   return 1
 }
+
+# install_claude_profile_stub [<dir>] — put a `claude-profile` on PATH that
+# answers `list` with the porcelain claude-profile really emits:
+#   <name>\t<dir>[\tactive]
+# Dirs are resolved against $HOME at call time, so the same stub serves a local
+# machine and a fake remote one (the stub is on PATH for both).
+install_claude_profile_stub() {
+  local bindir="${1:-$BATS_TEST_TMPDIR/bin}"
+  mkdir -p "$bindir"
+  cat > "$bindir/claude-profile" <<'STUB'
+#!/bin/sh
+[ "$1" = list ] || exit 2
+printf 'daily\t%s/.claude\n' "$HOME"
+printf 'client\t%s/.claude-work\tactive\n' "$HOME"
+STUB
+  chmod +x "$bindir/claude-profile"
+  export PATH="$bindir:$PATH"
+}
