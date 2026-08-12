@@ -77,6 +77,40 @@ function _ccfind_strip_sgr() {
   print -rn -- "$out$s"
 }
 
+# _ccfind_claude_profiles — print "<label>\t<dir>" for every profile
+# claude-profile knows about, or nothing if it is not installed here.
+#
+# The other way to be multi-profile. `claude-profile list` prints exactly
+# "<name>\t<dir>[\tactive]", which is already the shape ccfind wants, and it is
+# porcelain claude-profile keeps byte-identical for consumers — so this parses
+# the sanctioned interface rather than reaching into its config.json.
+#
+# Three ways to reach it, in order of how much they can be trusted to exist:
+# an explicit $CCFIND_PROFILE_CMD; the command itself, which in an interactive
+# shell is the function claude-profile.zsh defines; and finally the .py at the
+# conventional install paths — needed because the remote worker runs `zsh -f`,
+# where no rc has run and no function exists (the same reason ccfind itself has
+# to be found by path out there).
+function _ccfind_claude_profiles() {
+  local out=""
+  if [[ -n "${CCFIND_PROFILE_CMD:-}" ]]; then
+    out="$(${(z)CCFIND_PROFILE_CMD} list 2>/dev/null)"
+  fi
+  if [[ -z "$out" ]] && (( ${+commands[claude-profile]} + ${+functions[claude-profile]} )); then
+    out="$(claude-profile list 2>/dev/null)"
+  fi
+  if [[ -z "$out" ]] && command -v python3 >/dev/null 2>&1; then
+    local _c
+    for _c in "${CCFIND_PROFILE_PATH:-}" "$HOME/claude-profile/claude-profile.py" \
+              "$HOME/.zsh/claude-profile/claude-profile.py" \
+              "$HOME/.config/claude-profile/claude-profile.py"; do
+      [[ -n "$_c" && -r "$_c" ]] || continue
+      out="$(python3 "$_c" list 2>/dev/null)" && [[ -n "$out" ]] && break
+    done
+  fi
+  print -rn -- "$out"
+}
+
 # _ccfind_json_str <text> — print <text> as a JSON string literal, quotes and
 # all. Everything JSON forbids raw inside a string, escaped in the one order
 # that works: backslashes first (or every escape added below would be escaped
@@ -374,17 +408,18 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH=""
       source "$_envf"
       [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
       [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
       [[ -z "$_cfg_tabs" ]]          && _cfg_tabs="$CCFIND_TABS"
       [[ -z "$_cfg_remote_resume" ]] && _cfg_remote_resume="$CCFIND_REMOTE_RESUME"
       [[ -z "$_cfg_remote_path" ]]   && _cfg_remote_path="$CCFIND_REMOTE_PATH"
+      [[ -z "$_cfg_profile_path" ]]  && _cfg_profile_path="$CCFIND_PROFILE_PATH"
     fi
   fi
 
@@ -467,28 +502,53 @@ function ccfind() {
   }
 
 
-  # ---- Local search profiles. Opt-in via CCFIND_PROFILES ("label:dir ..."):
-  # each token maps a display label to a Claude config dir; the search covers
-  # <dir>/projects for every configured profile that exists. Unset/none present
-  # → a single "local" profile at ~/.claude, byte-identical to prior behavior.
+  # ---- Local search profiles ----------------------------------------------
+  # A machine is multi-profile in one of two ways, and both count:
+  #
+  #   1. CCFIND_PROFILES — "label:dir …" in the .env or the environment. This
+  #      is the explicit answer and wins outright.
+  #   2. claude-profile — if it manages the seats on this machine, it already
+  #      knows them, and listing them again here is a second copy that drifts.
+  #      Asked only when (1) yields nothing, so it costs nothing to anyone who
+  #      configured ccfind directly.
+  #
+  # Either way a profile is only kept if its dir is actually present, so one
+  # .env shared across a fleet degrades per host instead of inventing seats.
+  # Nothing found → a single nameless profile at ~/.claude, byte-identical to
+  # the behaviour before any of this existed.
   local -a prof_labels prof_roots
   local -A prof_cfgdir
-  local profiles_on=0
+  local profiles_on=0 prof_source=""
+  local _tok _lbl _dir
+  _ccfind_add_profile() {   # <label> <dir>
+    _lbl="$1"; _dir="${2/#\~/$HOME}"              # expand a leading ~
+    [[ -n "$_lbl" && -n "$_dir" ]] || return 0
+    [[ -d "$_dir/projects" ]] || return 0          # not present on this machine
+    [[ -n "${prof_cfgdir[$_lbl]+x}" ]] && return 0 # first definition wins
+    prof_labels+=("$_lbl"); prof_roots+=("$_dir/projects"); prof_cfgdir[$_lbl]="$_dir"
+  }
+
   if [[ -n "$_cfg_profiles" ]]; then
-    local _tok _lbl _dir
     for _tok in ${(s: :)${_cfg_profiles//,/ }}; do
       [[ "$_tok" == *:* ]] || continue
-      _lbl="${_tok%%:*}"; _dir="${_tok#*:}"
-      [[ -n "$_lbl" && -n "$_dir" ]] || continue
-      _dir="${_dir/#\~/$HOME}"                    # expand a leading ~
-      [[ -d "$_dir/projects" ]] || continue        # skip profiles not present here
-      prof_labels+=("$_lbl"); prof_roots+=("$_dir/projects"); prof_cfgdir[$_lbl]="$_dir"
+      _ccfind_add_profile "${_tok%%:*}" "${_tok#*:}"
     done
-    (( ${#prof_labels} > 0 )) && profiles_on=1
+    (( ${#prof_labels} > 0 )) && { profiles_on=1; prof_source="CCFIND_PROFILES" }
+  fi
+  if (( ! profiles_on )); then
+    local _cpline
+    # .env-configured hint, handed to the helper the way it reads it
+    local CCFIND_PROFILE_PATH="$_cfg_profile_path"
+    for _cpline in ${(f)"$(_ccfind_claude_profiles)"}; do
+      [[ -n "$_cpline" ]] || continue
+      _ccfind_add_profile "${_cpline%%$'\t'*}" "${${_cpline#*$'\t'}%%$'\t'*}"
+    done
+    (( ${#prof_labels} > 0 )) && { profiles_on=1; prof_source="claude-profile" }
   fi
   if (( ! profiles_on )); then
     prof_labels=(local); prof_roots=("${HOME}/.claude/projects"); prof_cfgdir[local]="${HOME}/.claude"
   fi
+  (( verbose )) && print -u2 -r -- "${_CCF_DIM}ccfind: profiles: ${prof_source:-none (~/.claude only)}${prof_source:+ → ${(j:, :)prof_labels}}${_CCF_OFF}"
 
   # ---- Positional profile selector: `ccfind <label> [text...]`. Only fires
   # when profiles are configured AND the first word exactly matches a label
@@ -595,7 +655,7 @@ if [ -n "$cc" ] && command -v zsh >/dev/null 2>&1; then
   # that does (SendEnv, or a stand-in during testing) would otherwise have this
   # host searching the CALLER's profile directories under its own name.
   unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
-        CCFIND_COLOR CCFIND_REMOTE_RESUME
+        CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD
   # -l pins it local: this host must not fan out to hosts of its own, whatever
   # its .env says. An older ccfind rejects --tsv and exits non-zero with no
   # output, which lands in the same fallback as not having ccfind at all — so

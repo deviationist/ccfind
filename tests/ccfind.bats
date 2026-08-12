@@ -488,3 +488,69 @@ setup() { ccfind_setup; }
   # one location line per hit: "<mtime>  nas:<cwd>"
   assert_equal "$(grep -c 'nas:' <<<"$output")" 1
 }
+
+# --- multi-profile via claude-profile ---------------------------------------
+# The second way a machine can be multi-profile: claude-profile manages the
+# seats, and listing them again in ccfind's .env would be a copy that drifts.
+
+@test "profiles are discovered from claude-profile when none are configured" {
+  install_claude_profile_stub
+  mk_session "$FIXHOME/.claude"      "/a/one" D1 "deploy daily"
+  mk_session "$FIXHOME/.claude-work" "/a/two" C1 "deploy client"
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "daily:/a/one"
+  assert_contains "$output" "client:/a/two"
+}
+
+@test "a discovered profile resumes into its own config dir" {
+  install_claude_profile_stub
+  mk_session "$FIXHOME/.claude-work" "/a/two" C1 "deploy client"
+  run_ccfind -N deploy
+  assert_contains "$output" "CLAUDE_CONFIG_DIR=$FIXHOME/.claude-work claude --resume C1"
+}
+
+@test "CCFIND_PROFILES wins over claude-profile" {
+  install_claude_profile_stub
+  mk_session "$FIXHOME/.claude"      "/a/one" D1 "deploy daily"
+  mk_session "$BATS_TEST_TMPDIR/own" "/a/own" O1 "deploy own"
+  export CCFIND_PROFILES="mine:$BATS_TEST_TMPDIR/own"
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "mine:/a/own"
+  refute_contains "$output" "daily:"        # not consulted at all
+}
+
+@test "a claude-profile seat that is absent here is skipped" {
+  # The stub names two seats; only one exists. A machine must not invent the
+  # other — the same degradation an .env shared across a fleet relies on.
+  install_claude_profile_stub
+  mk_session "$FIXHOME/.claude" "/a/one" D1 "deploy daily"
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "daily:/a/one"
+  refute_contains "$output" "client:"
+}
+
+@test "-v names where the profiles came from" {
+  install_claude_profile_stub
+  mk_session "$FIXHOME/.claude" "/a/one" D1 "deploy daily"
+  run_ccfind -N -v deploy
+  assert_contains "$output" "profiles: claude-profile"
+}
+
+@test "a remote host multi-profile via claude-profile reports its seats" {
+  # The far end has no CCFIND_PROFILES at all — only claude-profile. The whole
+  # chain has to work out there: worker finds ccfind, that ccfind finds
+  # claude-profile, and its seats come back tagged with the host.
+  install_ssh_stub_real_host
+  rm -f "$REMOTE_CCFIND_DIR/.env"                    # no .env: claude-profile only
+  install_claude_profile_stub "$BATS_TEST_TMPDIR/bin"
+  mk_session "$REMOTE_HOME/.claude"      "/srv/one" R1 "remote deploy daily"
+  mk_session "$REMOTE_HOME/.claude-work" "/srv/two" R2 "remote deploy client"
+  run_ccfind -H nas -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "nas:daily:/srv/one"
+  assert_contains "$output" "nas:client:/srv/two"
+  assert_contains "$output" "CLAUDE_CONFIG_DIR=$REMOTE_HOME/.claude-work"
+}

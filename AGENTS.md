@@ -45,8 +45,15 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   results[]) and `--tsv` (the wire record, host column dropped — the caller knows the
   alias it dialled). Both imply no picker and no colour, and stay well-formed with
   zero results: a sentence where a document belongs would be parsed as a record.
-- **Multi-profile (`CCFIND_PROFILES="label:configdir ..."`):** unions several local
-  Claude config dirs, tags each hit with its label. `ccfind foo` = all profiles;
+- **Multi-profile — two sources, checked in order:** `CCFIND_PROFILES="label:dir …"`
+  (env or `.env`), else **claude-profile** (`claude-profile list`, its stable
+  `name<TAB>dir[<TAB>active]` porcelain; found as command/function, else
+  `python3 <path>/claude-profile.py` at `$CCFIND_PROFILE_PATH` / `~/claude-profile/`
+  / `~/.zsh/claude-profile/` / `~/.config/claude-profile/`; `$CCFIND_PROFILE_CMD`
+  overrides). A profile whose dir is absent here is skipped, so shared config
+  degrades per machine. Neither → single nameless `~/.claude`. `-v` names the source.
+  Both work on remote hosts too, since the host runs its own ccfind and resolves its
+  own seats. Unions the dirs, tags each hit with its label. `ccfind foo` = all profiles;
   `ccfind <label> foo` / `-p <label>` = one. Resume runs under that profile
   (`CLAUDE_CONFIG_DIR=<dir> claude --resume`). Unset → single `~/.claude` (unchanged).
 - **Colour:** roles, not decoration — cyan = local profile label, magenta = remote
