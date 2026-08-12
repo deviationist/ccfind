@@ -10,7 +10,7 @@ session is a `.jsonl` transcript under
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
 <div align="center">
-  <img src="assets/demo-e78462.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+  <img src="assets/demo-f991f0.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
 </div>
 
 ## Install
@@ -59,7 +59,7 @@ profile or host it belongs to, its working directory, and the matching text with
 search term picked out.
 
 <div align="center">
-  <img src="assets/picker-e78462.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+  <img src="assets/picker-f991f0.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
 </div>
 
 | Key | Action |
@@ -78,7 +78,7 @@ before committing to one. On a remote hit the transcript is fetched over ssh on
 demand (once per session, then cached for as long as the picker is open):
 
 <div align="center">
-  <img src="assets/preview-e78462.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+  <img src="assets/preview-f991f0.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
 </div>
 
 ### Flat-list fallback
@@ -91,7 +91,7 @@ when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`
 `CCFIND_INTERACTIVE=0` is set.
 
 <div align="center">
-  <img src="assets/list-e78462.svg" alt="the ccfind flat list: each hit as a timestamp and profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+  <img src="assets/list-f991f0.svg" alt="the ccfind flat list: each hit as a timestamp and profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
 </div>
 
 ```zsh
@@ -236,7 +236,7 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 local-only runs, or when `CCFIND_TABS` is unset.
 
 <div align="center">
-  <img src="assets/tabs-e78462.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+  <img src="assets/tabs-f991f0.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
 </div>
 
 ## Notes
