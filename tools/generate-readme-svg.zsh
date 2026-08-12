@@ -109,32 +109,50 @@ seed "$work" "$C3" 91ad7c60 10800 \
 seed "$personal" "$fakehome/.zsh" c08f14b2 172800 \
   "$(u "$fakehome/.zsh" 'zle widget rebinding after a connection refused in the prompt hook')"
 
-# ---- stub ssh: the one remote host, without a network ----------------------
-# ccfind reaches a host twice — once piping its POSIX worker over `sh -s` (the
-# search), once as `cat <path>` (the preview fetch). Both are answered here.
-remote_tsv="$tmp/nas.tsv"
-remote_jsonl="$tmp/nas-transcript.jsonl"
-{
-  u '/srv/media-tools' 'rclone mount died overnight — connection refused from the metadata endpoint'
-  a '/srv/media-tools' 'The token refresh runs at 04:00 and the mount is not retried after it.'
-} > "$remote_jsonl"
-print -r -- "$(( EPOCHSECONDS - 2400 ))	a1c6f83b	/srv/media-tools	$(strftime '%Y-%m-%d %H:%M:%S' $(( EPOCHSECONDS - 2400 )))	$(head -n1 "$remote_jsonl" | cut -c25-144)	/root/.claude/projects/-srv-media-tools/a1c6f83b.jsonl" > "$remote_tsv"
+# ---- stub ssh: one remote host, without a network --------------------------
+# The host is a whole fake machine rather than a canned reply: its own $HOME,
+# its own ccfind install, and its own .env naming ITS profiles — which is the
+# point, since those labels are something the caller cannot know and has to ask
+# the host for. The stub runs the command locally under that HOME, so the
+# worker script really travels over stdin, really finds that ccfind, and the
+# rows really come from its --tsv emitter. The preview fetch (`cat <path>`)
+# lands in the same place.
+rhome="$tmp/remote-home"
+rcc="$tmp/remote-ccfind"
+mkdir -p "$rhome" "$rcc"
+cp "$root/ccfind.zsh" "$rcc/ccfind.zsh"
+cat > "$rcc/.env" <<ENV
+typeset CCFIND_PROFILES="ops:$rhome/.claude media:$rhome/.claude-media"
+ENV
+
+R1=/srv/media-tools
+R2=/srv/backup
+# seed_at <config-dir> <cwd> <id> <age> <lines…> — seed(), but on the fake host.
+seed_at() {
+  local dir="$1" cwd="$2" id="$3" age="$4"; shift 4
+  local enc="${cwd//\//-}"
+  mkdir -p "$dir/projects/$enc"
+  local f="$dir/projects/$enc/$id.jsonl" ln
+  : > "$f"
+  for ln in "$@"; do print -r -- "$ln" >> "$f"; done
+  touch -t "$(strftime '%Y%m%d%H%M.%S' $(( EPOCHSECONDS - age )))" "$f"
+}
+seed_at "$rhome/.claude" "$R1" a1c6f83b 2400 \
+  "$(u "$R1" 'rclone mount died overnight — connection refused from the metadata endpoint')" \
+  "$(a "$R1" 'The token refresh runs at 04:00 and the mount is never retried after it.')"
+seed_at "$rhome/.claude-media" "$R2" e5710b93 7200 \
+  "$(u "$R2" 'restic check ends in connection refused halfway through the snapshot list')"
 
 cat > "$tmp/bin/ssh" <<'STUB'
 #!/bin/sh
-# Stub ssh. The search worker arrives as `sh -s -- …` on the command line with
-# the script on stdin; the preview arrives as `cat <path>`. Anything else is a
-# connection this demo was not supposed to make.
-for a in "$@"; do
-  case "$a" in
-    "sh -s"*) cat "$REMOTE_TSV"; exit 0 ;;
-    cat\ *)   cat "$REMOTE_JSONL"; exit 0 ;;
-  esac
-done
-exit 1
+# Stub ssh: run the remote command here, under the fake host's HOME. The last
+# argument is the command, exactly as a real ssh would receive it.
+for a in "$@"; do cmd="$a"; done
+cmd="${cmd#CCFIND_REMOTE_PATH=* }"        # the caller's hint; we point at ours
+HOME="$REMOTE_HOME" CCFIND_REMOTE_PATH="$REMOTE_CCFIND" exec sh -c "$cmd"
 STUB
 chmod +x "$tmp/bin/ssh"
-export REMOTE_TSV="$remote_tsv" REMOTE_JSONL="$remote_jsonl"
+export REMOTE_HOME="$rhome" REMOTE_CCFIND="$rcc/ccfind.zsh"
 
 # ---- stub fzf: record what the picker is handed ---------------------------
 # Written before PATH is exported: zsh hashes the contents of every PATH
@@ -190,17 +208,19 @@ pv_out=$( export CCFIND_LOCAL_LABELS="work personal" CCFIND_PV_QUERY="$QUERY"
 pv_nas=$( export CCFIND_LOCAL_LABELS="work personal" CCFIND_PV_QUERY="$QUERY" \
                  CCFIND_PV_CACHE="$tmp"
           source "$ccfind_zsh"
-          _ccfind_preview nas /root/.claude/projects/-srv-media-tools/a1c6f83b.jsonl 2>&1 )
+          _ccfind_preview nas "$rhome/.claude/projects/${R1//\//-}/a1c6f83b.jsonl" 2>&1 )
 
 # The tool prints paths verbatim; contract the sandbox home the same way it
 # would contract a real one, so the demo reads like a machine and not a
 # mktemp dir. Display-only — nothing about the run depends on it.
 enc_home="${fakehome//\//-}"      # Claude's cwd encoding: every / becomes -
 list_out=${list_out//$fakehome/\~}
+list_out=${list_out//$rhome/\~}
 pv_out=${pv_out//$enc_home/-Users-demo}
 pv_out=${pv_out//$fakehome/\~}
 pv_nas=${pv_nas//$enc_home/-Users-demo}
 pv_nas=${pv_nas//$fakehome/\~}
+pv_nas=${pv_nas//$rhome/\~}          # the remote's own home, contracted alike
 
 typeset -a rows fargs trows tfargs
 rows=("${(@f)$(<"$tmp/rows")}");        rows=(${rows:#})
@@ -214,6 +234,8 @@ rows=("${(@)rows/*$'\t'/}")      # * is greedy: everything through the last tab
 trows=("${(@)trows/*$'\t'/}")
 rows=("${(@)rows//$fakehome/\~}")
 trows=("${(@)trows//$fakehome/\~}")
+rows=("${(@)rows//$rhome/\~}")
+trows=("${(@)trows//$rhome/\~}")
 
 header=''; theader=''
 for a in "${fargs[@]}";  do [[ $a == --header=* ]] && header=${a#--header=};  done
