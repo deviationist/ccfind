@@ -801,3 +801,91 @@ lead = d.index("NEEDLE") - d.index("…")
 print("close" if 0 < lead <= 14 else f"far:{lead}")' <<<"$disp"
   assert_equal "$output" "close"
 }
+
+# --- Enter: the picker's resume branch --------------------------------------
+# The cancelling fzf stub never gets here. This one selects, so the real branch
+# runs: parse the row, cd, and hand off to claude — locally or over ssh.
+
+@test "Enter on a local hit cds there and resumes it" {
+  install_fzf_stub_select
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" S1 "termx"
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume S1]"
+  assert_contains "$output" "pwd=[$BATS_TEST_TMPDIR/proj]"
+  assert_contains "$output" "dir=[<unset>]"        # unconfigured: nothing pinned
+}
+
+@test "Enter on a profile hit resumes into that profile's seat" {
+  install_fzf_stub_select
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/proj" P1 "termx"
+  export CCFIND_PROFILES="personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume P1]"
+  assert_contains "$output" "dir=[$BATS_TEST_TMPDIR/personal]"
+}
+
+@test "Enter on a remote hit goes over ssh with that host's seat" {
+  # The row's own config dir travels with it, so the far end opens the seat the
+  # session belongs to rather than whatever that host defaults to.
+  install_fzf_stub_select
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude-personal" "/srv/side" R2 "termx"
+  run_ccfind -i -H nas termx
+  assert_equal "$status" 0
+  local log; log="$(cat "$SSH_LOG")"
+  assert_contains "$log" "-t nas"
+  assert_contains "$log" "cd /srv/side"
+  # the seat the hit belongs to on THAT machine, which is the whole point
+  assert_contains "$log" "CLAUDE_CONFIG_DIR=$REMOTE_HOME/.claude-personal"
+  assert_contains "$log" "claude"
+}
+
+@test "Enter refuses when the session's directory is gone" {
+  install_fzf_stub_select
+  install_claude_stub
+  mk_session "$FIXHOME/.claude" "/vanished/dir" S1 "termx"
+  run_ccfind -i termx
+  assert_equal "$status" 1
+  assert_contains "$output" "no longer exists"
+  refute_contains "$output" "argv="              # and claude is never reached
+}
+
+# --- Tab: what the binding computes -----------------------------------------
+# fzf's own redraw is fzf's business; what ccfind owns is the action string it
+# hands back, and which view is next. Both are plain functions over a state dir.
+
+@test "tab_shift advances the view and emits fzf's action chain" {
+  mk_tabsdir "$BATS_TEST_TMPDIR/tabs" All work nas
+  run env zsh -fc 'source "$1"; _ccfind_tab_shift "$2" 1' _ "$CCFIND_ZSH" "$BATS_TEST_TMPDIR/tabs"
+  assert_equal "$status" 0
+  assert_contains "$output" "reload(cat -- $BATS_TEST_TMPDIR/tabs/view-2.rows)"
+  assert_contains "$output" "change-header{"
+  assert_contains "$output" "+first"
+  assert_equal "$(cat "$BATS_TEST_TMPDIR/tabs/cur")" 2
+}
+
+@test "tab_shift wraps around in both directions" {
+  mk_tabsdir "$BATS_TEST_TMPDIR/tabs" All work nas
+  # backwards from the first view lands on the last
+  run env zsh -fc 'source "$1"; _ccfind_tab_shift "$2" -1' _ "$CCFIND_ZSH" "$BATS_TEST_TMPDIR/tabs"
+  assert_equal "$(cat "$BATS_TEST_TMPDIR/tabs/cur")" 3
+  # and forwards from the last comes back to the first
+  run env zsh -fc 'source "$1"; _ccfind_tab_shift "$2" 1' _ "$CCFIND_ZSH" "$BATS_TEST_TMPDIR/tabs"
+  assert_equal "$(cat "$BATS_TEST_TMPDIR/tabs/cur")" 1
+}
+
+@test "tab_header marks the current view and keeps the key hints" {
+  mk_tabsdir "$BATS_TEST_TMPDIR/tabs" All work nas
+  echo 2 > "$BATS_TEST_TMPDIR/tabs/cur"
+  run env zsh -fc 'source "$1"; _ccfind_tab_header "$2"' _ "$CCFIND_ZSH" "$BATS_TEST_TMPDIR/tabs"
+  assert_equal "$status" 0
+  assert_contains "$output" $'\033[1;7m work \033[0m'   # current: reverse video
+  assert_contains "$output" $'\033[2m All \033[0m'      # the others: dimmed
+  assert_contains "$output" "keys here"
+}
