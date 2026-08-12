@@ -129,9 +129,10 @@ the same bytes they did before. To force the question:
 
 ## Multi-profile search
 
-If you run Claude Code under more than one config dir — e.g. separate work and
-personal accounts (`CLAUDE_CONFIG_DIR`) — `ccfind` searches all of them at once and
-tags each hit with its profile. There are two ways to be multi-profile, and both
+If you run Claude Code under more than one config dir — e.g. a separate `~/.claude`
+and `~/.claude-personal` (`CLAUDE_CONFIG_DIR`) — `ccfind` searches all of them at
+once and tags each hit with its profile. A profile is a *directory*: the sessions,
+settings and memory live in it, which is why it is the unit ccfind works in. There are two ways to be multi-profile, and both
 count:
 
 **1. Tell ccfind** — space/comma-separated `label:configdir` pairs, where
@@ -162,10 +163,8 @@ ccfind: profiles: claude-profile → work, personal
 ```
 
 > **Upgrading with claude-profile installed:** searches that used to cover `~/.claude`
-> only will now cover every seat, and each hit's resume line will pin its own
-> `CLAUDE_CONFIG_DIR`. That is the point — a session reopens in the seat it belongs
-> to — but it does mean claude-profile's own launch-time path-rule routing no longer
-> applies to a resume, since the seat is already decided by the hit.
+> alone now cover every profile it reports, and each hit's resume line pins its own
+> `CLAUDE_CONFIG_DIR` — the hit already knows which profile it belongs to.
 
 - **Union by default.** `ccfind foo` searches every configured profile; hits show a
   `work:` / `personal:` column (picker) or prefix (flat list).
@@ -176,7 +175,7 @@ ccfind: profiles: claude-profile → work, personal
   multi-profile is off.
 - **Correct resume.** Resuming a hit runs it under its own profile
   (`CLAUDE_CONFIG_DIR=<that dir> claude --resume <id>`), so a personal session
-  reopens on the personal account regardless of where you launched `ccfind`.
+  reopens in the personal profile regardless of where you launched `ccfind`.
 - **Profiles + hosts compose.** With both `CCFIND_PROFILES` and `CCFIND_HOSTS` set,
   `ccfindr foo` searches every local profile *and* every remote host; tabs become
   `All │ work │ personal │ <host>…`. Remote hosts have profiles of their own — see
