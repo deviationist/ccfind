@@ -643,41 +643,54 @@ function ccfind() {
 q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"
 root="$HOME/.claude/projects"
 
-cc=""
-for c in $CCFIND_REMOTE_PATH "$HOME/ccfind/ccfind.zsh" "$HOME/.zsh/ccfind/ccfind.zsh" \
-         "$HOME/.config/ccfind/ccfind.zsh"; do
-  [ -n "$c" ] && [ -r "$c" ] && { cc="$c"; break; }
-done
-if [ -n "$cc" ] && command -v zsh >/dev/null 2>&1; then
-  # The host's own config is the whole point of asking it, so make sure it is
-  # the ONLY config in play: drop any CCFIND_* the caller's environment managed
-  # to leak across. A real ssh forwards nothing by default, but a transport
-  # that does (SendEnv, or a stand-in during testing) would otherwise have this
-  # host searching the CALLER's profile directories under its own name.
-  unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
-        CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD
-  # -l pins it local: this host must not fan out to hosts of its own, whatever
-  # its .env says. An older ccfind rejects --tsv and exits non-zero with no
-  # output, which lands in the same fallback as not having ccfind at all — so
-  # a fleet mid-upgrade degrades instead of erroring.
-  if [ -n "$dpath" ]; then
-    out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$cc" --tsv -l -n "$max" -d "$dpath" -- "$q" 2>/dev/null)
+# The host's own config is the whole point of asking it, so make sure it is the
+# ONLY config in play: drop any CCFIND_* the caller's environment managed to
+# leak across. A real ssh forwards nothing by default, but a transport that does
+# (SendEnv, or a stand-in during testing) would otherwise have this host
+# searching the CALLER's profile directories under its own name.
+unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
+      CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD
+
+# Try EVERY candidate, not just the first one that exists. A host can easily
+# carry more than one clone — one left where the tool used to live, one where it
+# lives now — and stopping at the first lets a stale copy that cannot answer
+# shadow a current one at the very next path, taking the whole host down to the
+# filesystem walk. (Seen in the field: a pre-split ~/ccfind shadowing
+# ~/.zsh/ccfind, the host reporting itself incompatible while a perfectly good
+# ccfind sat one line further down this list.) So "incompatible" means every
+# candidate was tried and none of them answered.
+cc_found=0
+if command -v zsh >/dev/null 2>&1; then
+  for c in $CCFIND_REMOTE_PATH "$HOME/ccfind/ccfind.zsh" "$HOME/.zsh/ccfind/ccfind.zsh" \
+           "$HOME/.config/ccfind/ccfind.zsh"; do
+    [ -n "$c" ] && [ -r "$c" ] || continue
+    cc_found=1
+    # -l pins it local: this host must not fan out to hosts of its own, whatever
+    # its .env says. An older ccfind rejects --tsv and exits non-zero, which is
+    # what moves us on to the next candidate — and, with none left, into the
+    # fallback, so a fleet mid-upgrade degrades instead of erroring.
+    if [ -n "$dpath" ]; then
+      out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" --tsv -l -n "$max" -d "$dpath" -- "$q" 2>/dev/null)
+    else
+      out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" --tsv -l -n "$max" -- "$q" 2>/dev/null)
+    fi
+    # Exit status alone decides, NOT whether anything came back: a search that
+    # legitimately matched nothing is a successful remote search, and testing
+    # for output would demote it to a fallback — a pointless second walk of the
+    # disk, reported as a capability the host actually has.
+    if [ $? -eq 0 ]; then
+      echo "#ccfind mode=remote"
+      [ -n "$out" ] && printf '%s\n' "$out"
+      exit 0
+    fi
+  done
+  if [ "$cc_found" = 1 ]; then
+    echo "#ccfind mode=fallback reason=incompatible"
   else
-    out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$cc" --tsv -l -n "$max" -- "$q" 2>/dev/null)
+    echo "#ccfind mode=fallback reason=not-installed"
   fi
-  # Exit status alone decides, NOT whether anything came back: a search that
-  # legitimately matched nothing is a successful remote search, and testing for
-  # output would demote it to a fallback — a pointless second walk of the disk,
-  # reported as a capability the host actually has. An older ccfind rejects
-  # --tsv and exits non-zero, which is the case this needs to catch.
-  if [ $? -eq 0 ]; then
-    echo "#ccfind mode=remote"
-    [ -n "$out" ] && printf '%s\n' "$out"
-    exit 0
-  fi
-  echo "#ccfind mode=fallback reason=incompatible"
 else
-  echo "#ccfind mode=fallback reason=not-installed"
+  echo "#ccfind mode=fallback reason=no-zsh"
 fi
 
 [ -d "$root" ] || exit 0
