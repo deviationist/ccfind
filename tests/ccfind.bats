@@ -554,3 +554,250 @@ setup() { ccfind_setup; }
   assert_contains "$output" "nas:client:/srv/two"
   assert_contains "$output" "CLAUDE_CONFIG_DIR=$REMOTE_HOME/.claude-work"
 }
+
+# --- tab views (CCFIND_TABS=1) ----------------------------------------------
+# The picker's tab bar is built from the pre-cap row list and filtered per view.
+# Local profiles and remote hosts match on DIFFERENT fields — (host=local,
+# profile=<label>) vs field 1 — which is exactly the sort of thing that breaks
+# silently when the record schema changes, and did not have a test before.
+
+@test "tabs: one view per profile and host, All first" {
+  install_fzf_stub
+  install_ssh_stub_real_host
+  mk_session "$BATS_TEST_TMPDIR/work"     "/w/a"    W1 "termx"
+  mk_session "$BATS_TEST_TMPDIR/personal" "/p/a"    P1 "termx"
+  mk_session "$REMOTE_HOME/.claude"       "/srv/a"  R1 "termx"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  export CCFIND_TABS=1
+  run_ccfind -i -H nas termx
+  assert_equal "$status" 0
+  assert_equal "$(cat "$FZF_TABS/views" | tr '\n' ' ')" "All work personal nas "
+}
+
+@test "tabs: a profile view holds only that profile's rows" {
+  install_fzf_stub
+  mk_session "$BATS_TEST_TMPDIR/work"     "/w/a" W1 "termx"
+  mk_session "$BATS_TEST_TMPDIR/personal" "/p/a" P1 "termx"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  export CCFIND_TABS=1
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  # view-1 is All; 2 and 3 follow the order the profiles are configured in
+  assert_equal "$(wc -l < "$FZF_TABS/view-2.rows" | tr -d ' ')" 1
+  assert_contains "$(cat "$FZF_TABS/view-2.rows")" "/w/a"
+  refute_contains "$(cat "$FZF_TABS/view-2.rows")" "/p/a"
+  assert_contains "$(cat "$FZF_TABS/view-3.rows")" "/p/a"
+  refute_contains "$(cat "$FZF_TABS/view-3.rows")" "/w/a"
+}
+
+@test "tabs: a host view holds every seat on that host" {
+  # A host tab is not split by profile: it is that machine, whatever seats it
+  # turned out to have.
+  install_fzf_stub
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude"          "/srv/one" R1 "termx"
+  mk_session "$REMOTE_HOME/.claude-personal" "/srv/two" R2 "termx"
+  export CCFIND_TABS=1
+  run_ccfind -i -H nas termx
+  assert_equal "$status" 0
+  assert_equal "$(cat "$FZF_TABS/views" | tr '\n' ' ')" "All nas "
+  assert_contains "$(cat "$FZF_TABS/view-2.rows")" "/srv/one"
+  assert_contains "$(cat "$FZF_TABS/view-2.rows")" "/srv/two"
+}
+
+@test "tabs: no tab for a profile with no hits" {
+  install_fzf_stub
+  mkdir -p "$BATS_TEST_TMPDIR/personal/projects"      # configured, but nothing matches
+  mk_session "$BATS_TEST_TMPDIR/work" "/w/a" W1 "termx"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  export CCFIND_TABS=1
+  run_ccfind -i termx
+  assert_equal "$(cat "$FZF_TABS/views" | tr '\n' ' ')" "All work "
+}
+
+@test "tabs: unset means no tab machinery at all" {
+  install_fzf_stub
+  mk_session "$BATS_TEST_TMPDIR/work"     "/w/a" W1 "termx"
+  mk_session "$BATS_TEST_TMPDIR/personal" "/p/a" P1 "termx"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  [ ! -d "$FZF_TABS" ]
+  refute_contains "$(cat "$FZF_ARGV")" "tab:transform"
+}
+
+# --- the preview pane -------------------------------------------------------
+# Rendered into fzf's pane rather than to stdout, so it colours unconditionally
+# (the -t 1 rule the rest of the tool follows would switch it off exactly where
+# it is wanted) and had no coverage at all until now.
+
+@test "preview renders the last messages with role labels" {
+  mk_transcript "$FIXHOME/t.jsonl" \
+    "the deploy fails" "check the pooler port" "ok trying"
+  run_preview local "$FIXHOME/t.jsonl"
+  assert_equal "$status" 0
+  assert_contains "$output" "USER"
+  assert_contains "$output" "ASSISTANT"
+  assert_contains "$output" "check the pooler port"
+}
+
+@test "preview highlights the search term" {
+  mk_transcript "$FIXHOME/t.jsonl" "the deploy is DePlOyed twice"
+  run_preview local "$FIXHOME/t.jsonl" "deploy"
+  # case-insensitive, original casing preserved, in the same colour the list uses
+  assert_contains "$output" $'\033[1;33mdeploy\033[0m'
+  assert_contains "$output" $'\033[1;33mDePlOy\033[0m'
+}
+
+@test "preview says how much of the session it is showing" {
+  local -a msgs; local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do msgs+=("message $i"); done
+  mk_transcript "$FIXHOME/t.jsonl" "${msgs[@]}"
+  run_preview local "$FIXHOME/t.jsonl"
+  assert_contains "$output" "last 8 of 12 messages"
+  assert_contains "$output" "message 12"
+  refute_contains "$output" "message 3"      # older than the window
+}
+
+@test "preview honours NO_COLOR" {
+  mk_transcript "$FIXHOME/t.jsonl" "the deploy fails"
+  run env HOME="$FIXHOME" NO_COLOR=1 CCFIND_PV_QUERY="deploy" \
+      zsh -fc 'src=$1; shift; source "$src"; _ccfind_preview "$@"' _ "$CCFIND_ZSH" \
+      local "$FIXHOME/t.jsonl"
+  assert_equal "$status" 0
+  assert_contains "$output" "the deploy fails"
+  refute_contains "$output" $'\033['
+}
+
+@test "preview reduces tool calls rather than dumping them" {
+  printf '%s\n' \
+    '{"type":"user","message":{"role":"user","content":"run it"}}' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"on it"},{"type":"tool_use","name":"Bash"},{"type":"thinking","thinking":"secret reasoning"}]}}' \
+    > "$FIXHOME/t.jsonl"
+  run_preview local "$FIXHOME/t.jsonl"
+  assert_contains "$output" "[tool: Bash]"
+  refute_contains "$output" "secret reasoning"     # thinking blocks are omitted
+}
+
+@test "preview of a remote hit fetches over ssh and caches it" {
+  install_ssh_stub_real_host
+  mk_transcript "$REMOTE_HOME/t.jsonl" "remote side conversation"
+  run env HOME="$FIXHOME" CCFIND_PV_CACHE="$BATS_TEST_TMPDIR/pv" \
+      CCFIND_LOCAL_LABELS="local" CCFIND_PV_QUERY="" \
+      REMOTE_HOME="$REMOTE_HOME" REMOTE_CCFIND_DIR="$REMOTE_CCFIND_DIR" \
+      zsh -fc 'mkdir -p "$CCFIND_PV_CACHE"; src=$1; shift; source "$src"; _ccfind_preview "$@"' \
+      _ "$CCFIND_ZSH" nas "$REMOTE_HOME/t.jsonl"
+  assert_equal "$status" 0
+  assert_contains "$output" "remote side conversation"
+  assert_contains "$output" "nas"                       # labelled with its host
+  [ -s "$BATS_TEST_TMPDIR/pv/ccfind-pv-nas-t.jsonl" ]   # and cached for the toggle
+}
+
+@test "preview says so rather than failing when a file is unreadable" {
+  run_preview local "$FIXHOME/does-not-exist.jsonl"
+  assert_equal "$status" 0
+  assert_contains "$output" "cannot read"
+}
+
+# --- the remote protocol's edges --------------------------------------------
+
+@test "a remote ccfind too old for --tsv falls back instead of erroring" {
+  # Version skew is a live scenario in a fleet that updates at different times:
+  # the old ccfind rejects the flag and exits non-zero, and that has to land in
+  # the same fallback as having no ccfind at all.
+  install_ssh_stub_real_host
+  cat > "$REMOTE_CCFIND_DIR/ccfind.zsh" <<'OLD'
+# an older ccfind: knows nothing about --tsv
+function ccfind() { print -u2 "ccfind: unknown option $1"; return 2 }
+OLD
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  run_ccfind -H nas -N -v termx
+  assert_equal "$status" 0
+  assert_contains "$output" "no usable ccfind (incompatible)"
+  assert_contains "$output" "nas:/srv/app"        # still searched, the old way
+}
+
+@test "the caller's CCFIND_* does not follow the search onto a host" {
+  # Regression: an exported CCFIND_PROFILES reached the remote invocation, so
+  # the host searched the CALLER's profile directories and reported them under
+  # its own name. Real ssh forwards nothing, but a transport that does must not
+  # be able to reintroduce it.
+  install_ssh_stub_real_host
+  mk_session "$BATS_TEST_TMPDIR/local-only" "/only/here" L1 "termx"
+  mk_session "$REMOTE_HOME/.claude"         "/srv/app"   R1 "termx"
+  export CCFIND_PROFILES="sneaky:$BATS_TEST_TMPDIR/local-only"
+  run_ccfind -H nas -N termx
+  assert_equal "$status" 0
+  assert_contains "$output" "nas:rwork:/srv/app"    # the host's own seat, its own label
+  refute_contains "$output" "nas:sneaky"            # never the caller's
+  refute_contains "$output" "nas:/only/here"
+}
+
+@test "-d scopes the remote search too" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/keep"  K1 "termx"
+  mk_session "$REMOTE_HOME/.claude" "/srv/other" O1 "termx"
+  run_ccfind -H nas -N -d /srv/keep termx
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/keep"
+  refute_contains "$output" "/srv/other"
+}
+
+@test "--json reports a remote hit with its host and remote config dir" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude-personal" "/srv/side" R2 "termx"
+  run_ccfind -H nas --json termx
+  assert_equal "$status" 0
+  run python3 -c 'import json,sys; r=json.load(sys.stdin)["results"][0]; print(r["host"], r["profile"], r["config_dir"], r["cwd"])' <<<"$output"
+  assert_equal "$status" 0
+  assert_equal "$output" "nas rpersonal $REMOTE_HOME/.claude-personal /srv/side"
+}
+
+@test "CCFIND_PROFILE_CMD overrides how the profile list is obtained" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/my-profiles" <<STUB
+#!/bin/sh
+[ "\$1" = list ] || exit 2
+printf 'custom\t$BATS_TEST_TMPDIR/custom\n'
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/my-profiles"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  export CCFIND_PROFILE_CMD="my-profiles"
+  mk_session "$BATS_TEST_TMPDIR/custom" "/c/a" C1 "termx"
+  run_ccfind -N termx
+  assert_equal "$status" 0
+  assert_contains "$output" "custom:/c/a"
+}
+
+# --- what the picker's display column actually shows ------------------------
+
+@test "the display column contracts \$HOME but the resume keeps the full path" {
+  install_fzf_stub
+  mkdir -p "$FIXHOME/code/app"
+  mk_session "$FIXHOME/.claude" "$FIXHOME/code/app" S1 "termx"
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  local row; row="$(head -1 "$FZF_ROWS")"
+  assert_contains "$(cut -f9 <<<"$row")" "~/code/app"      # what you read
+  assert_equal    "$(cut -f5 <<<"$row")" "$FIXHOME/code/app"   # what it cds to
+}
+
+@test "the display column leads with the match, not with 45 characters of JSON" {
+  install_fzf_stub
+  # The snippet arrives centred on the match with a long lead-in; in the last
+  # column that lead is usually all that fits, so it is pulled forward.
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa NEEDLE bbbb"
+  export CCFIND_COLOR=always
+  run_ccfind -i NEEDLE
+  assert_equal "$status" 0
+  local disp; disp="$(cut -f9 < "$FZF_ROWS")"
+  assert_contains "$disp" "…"                     # the lead-in was cut
+  # the match sits within ~14 characters of where the snippet column starts
+  run python3 -c '
+import re, sys
+d = re.sub(r"\033\[[0-9;]*m", "", sys.stdin.read())
+lead = d.index("NEEDLE") - d.index("…")
+print("close" if 0 < lead <= 14 else f"far:{lead}")' <<<"$disp"
+  assert_equal "$output" "close"
+}

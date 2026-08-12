@@ -127,10 +127,22 @@ run_resume() {
 install_fzf_stub() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   export FZF_ROWS="$BATS_TEST_TMPDIR/fzf-rows" FZF_ARGV="$BATS_TEST_TMPDIR/fzf-argv"
+  export FZF_TABS="$BATS_TEST_TMPDIR/fzf-tabs"
   cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in --version) echo "0.74.2 (stub)"; exit 0 ;; esac
 printf '%s\n' "$@" > "$FZF_ARGV"
+# Snapshot the tab-view state directory while it still exists: ccfind builds it
+# in a temp dir wiped by the trap when the function returns, so a test can only
+# see it from in here. Its path is in the Tab keybinding ccfind passes us.
+for a in "$@"; do
+  case "$a" in
+    *_ccfind_tab_shift*)
+      d="${a#*_ccfind_tab_shift }"; d="${d%% *}"; d="${d%\'}"; d="${d#\'}"
+      [ -d "$d" ] && cp -R "$d" "$FZF_TABS"
+      break ;;
+  esac
+done
 cat > "$FZF_ROWS"
 exit 130
 STUB
@@ -183,4 +195,27 @@ printf 'client\t%s/.claude-work\tactive\n' "$HOME"
 STUB
   chmod +x "$bindir/claude-profile"
   export PATH="$bindir:$PATH"
+}
+
+# run_preview <host> <file> [query] — render the fzf preview pane for a
+# transcript, the way the picker's --preview command does (its own zsh, sourcing
+# ccfind.zsh and calling the function directly).
+run_preview() {
+  run env HOME="$FIXHOME" CCFIND_PV_QUERY="${3-}" CCFIND_PV_CACHE="$BATS_TEST_TMPDIR" \
+      CCFIND_LOCAL_LABELS="local" \
+      zsh -fc 'src=$1; shift; source "$src"; _ccfind_preview "$@"' _ "$CCFIND_ZSH" "$1" "$2"
+}
+
+# mk_transcript <file> <lines...> — a transcript with real message records, for
+# the preview to render. mk_session writes one searchable line; this writes a
+# conversation.
+mk_transcript() {
+  local f="$1"; shift
+  mkdir -p "${f%/*}"
+  : > "$f"
+  local role=user line
+  for line in "$@"; do
+    printf '{"type":"%s","message":{"role":"%s","content":"%s"}}\n' "$role" "$role" "$line" >> "$f"
+    [ "$role" = user ] && role=assistant || role=user
+  done
 }
