@@ -370,6 +370,7 @@ render_ansi() {
 #   b = blank                     t = plain          c = dim
 #   a = ANSI (terminal output)    h = fzf header     i = fzf match counter
 #   n = list row                  p = current row    q = fzf prompt + cursor
+#   x = shell input, block cursor parked after the last character
 # Everything in the fzf frame except q sits at column 2, as fzf indents it.
 emit_lines() {
   local -a _l=("${(@P)1}")
@@ -403,6 +404,8 @@ emit_lines() {
          out+="  <rect x=\"0\" y=\"$(( y - FS - 3 ))\" width=\"$W\" height=\"$LH\" fill=\"$HL\"/>"$'\n'
          out+="  <rect x=\"$(xat 0)\" y=\"$(( y - FS - 3 ))\" width=\"3\" height=\"$LH\" fill=\"$PTR\"/>"$'\n'
          out+="$T fill=\"$FG\">$RENDERED</text>"$'\n' ;;
+      x) out+="  <rect x=\"$(xat ${#body})\" y=\"$(( y - FS + 1 ))\" width=\"8\" height=\"$(( FS + 3 ))\" fill=\"$FG\" opacity=\"0.75\"/>"$'\n'
+         out+="$T fill=\"$FG\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>"$'\n' ;;
       q) out+="  <rect x=\"$(xat ${#body})\" y=\"$(( y - FS + 1 ))\" width=\"8\" height=\"$(( FS + 3 ))\" fill=\"$FG\" opacity=\"0.75\"/>"$'\n'
          out+="$T fill=\"$ACC\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>"$'\n' ;;
     esac
@@ -544,7 +547,7 @@ done
 # are the mechanism that actually survives the trip. prefers-reduced-motion
 # freezes the whole thing on the last frame.
 typeset -a a1 a2 a3 a4 a5
-a1=("t|$CMD_PICKER")
+a1=("x|$CMD_PICKER")
 # The one line here that is reconstructed rather than captured: ccfind prints
 # this only when stderr is a terminal, which a sandbox has no way to be. It is
 # the tool's own format string, filled with this run's host list.
@@ -563,11 +566,26 @@ for ln in "${(@f)pv_nas}"; do
   for w in "${WRAPPED[@]}"; do a5pv+=("a|$w"); done
 done
 
+# The command types itself in: one frame per keystroke, with the block cursor
+# parked after the last character. Same opacity mechanism as every other frame
+# — no clip-path or transform — so the typing rides on exactly the machinery
+# that is already known to survive the trip through GitHub. Each of these
+# frames is a single short line, so 30 of them cost almost nothing.
+# The "% " is the shell's prompt, not something the operator types.
 typeset -a FR FR_PV FR_KEY FR_DUR
-FR=(a1 a2 a3 a4 a5)
-FR_PV=('' '' '' '' a5pv)
-FR_KEY=('' '' '' '↓' '→')
-FR_DUR=(9 12 16 12 46)        # tenths of a second, so the sums stay integers
+CMD_TYPED=${CMD_PICKER#'% '}
+integer ci
+for (( ci = 0; ci < ${#CMD_TYPED}; ci++ )); do
+  set -A "type$ci" "x|% ${CMD_TYPED[1,ci]}"
+  FR+=("type$ci"); FR_PV+=(''); FR_KEY+=(''); FR_DUR+=(55)
+done
+
+# …then the run itself. Durations in milliseconds.
+FR+=(a1 a2 a3 a4 a5)
+FR_PV+=('' '' '' '' a5pv)
+# The keycap names the key that produced the frame you are looking at.
+FR_KEY+=('' '⏎' '' '↓' '→')
+FR_DUR+=(650 1000 1500 1200 4400)
 
 # keycap <W> <glyph> — the little pressed-key badge, top right under the bar.
 keycap() {
@@ -621,7 +639,7 @@ anim_svg() {
       p0=$(( at * 100.0 / total ))
       (( at += FR_DUR[j] ))
       p1=$(( at * 100.0 / total ))
-      print -r -- "    #fr$j{animation:k$j ${total}00ms step-end infinite}"
+      print -r -- "    #fr$j{animation:k$j ${total}ms step-end infinite}"
       if (( j == 1 )); then
         printf '    @keyframes k%d{0%%{opacity:1}%.3f%%{opacity:0}}\n' $j $p1
       elif (( j == ${#FR} )); then
@@ -634,11 +652,14 @@ anim_svg() {
     print -r -- "  </style>"
     chrome $W $H 'ccfind'
     for (( j = 1; j <= ${#FR}; j++ )); do
-      # opacity="0" as a presentation attribute, on every frame but the first:
+      # opacity="0" as a presentation attribute, on every frame but the LAST:
       # CSS (and therefore the animation) overrides it, so this changes nothing
       # where the timeline runs — but a renderer that ignores <style> altogether
-      # then shows frame 1 alone instead of all five stacked on top of each other.
-      print -r -- "  <g id=\"fr$j\" class=\"fr\"$( (( j > 1 )) && print -n ' opacity=\"0\"')>"
+      # then shows one frame instead of all of them stacked, and the one worth
+      # showing is the final state, which is what prefers-reduced-motion picks
+      # too. (First-frame-visible would now mean an empty prompt: the command
+      # types itself in, so frame 1 is a bare "%".)
+      print -r -- "  <g id=\"fr$j\" class=\"fr\"$( (( j < ${#FR} )) && print -n ' opacity=\"0\"')>"
       emit_lines ${FR[j]} $(( TH + PY )) 0 $W
       pv=${FR_PV[j]}
       if [[ -n $pv ]]; then
