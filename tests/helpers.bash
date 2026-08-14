@@ -30,9 +30,12 @@ ccfind_setup() {
 # mk_session <config-dir> <cwd> <id> <text>
 # Writes <config-dir>/projects/<encoded-cwd>/<id>.jsonl carrying a cwd field and
 # some searchable text (mirrors how Claude Code stores transcripts).
+# The encoding is Claude Code's: EVERY character outside [a-zA-Z0-9] becomes a
+# "-", not just the slash — so /home/me/.zsh/x → -home-me--zsh-x. Fixtures that
+# only flatten the slash cannot catch a scope bug on any dotted path.
 mk_session() {
   local root="$1" cwd="$2" id="$3" text="$4"
-  local enc="${cwd//\//-}"
+  local enc="${cwd//[^a-zA-Z0-9]/-}"
   mkdir -p "$root/projects/$enc"
   printf '{"cwd":"%s","text":"%s"}\n' "$cwd" "$text" > "$root/projects/$enc/$id.jsonl"
 }
@@ -41,6 +44,14 @@ mk_session() {
 # HOME. Exported CCFIND_* vars set by the test propagate into the subprocess.
 run_ccfind() {
   run env HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' _ "$CCFIND_ZSH" "$@"
+}
+
+# run_ccfind_in <dir> <ccfind-args...> — same, but from inside <dir>, for the
+# flags whose scope defaults to $PWD.
+run_ccfind_in() {
+  local dir="$1"; shift
+  run env HOME="$FIXHOME" zsh -fc 'cd -- "$1" || exit 1; src=$2; shift 2; source "$src"; ccfind "$@"' \
+    _ "$dir" "$CCFIND_ZSH" "$@"
 }
 
 # install_ssh_stub — shadow `ssh` with a stub that answers as a host WITHOUT
