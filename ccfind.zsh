@@ -318,6 +318,8 @@ function _ccfind_tab_shift() {
 #   ccfind <text...>            literal, case-insensitive search of all sessions
 #   ccfind -d <dir> <text...>   only sessions whose cwd is <dir> or below it
 #   ccfind -d . <text...>       scope to the current directory's subtree
+#   ccfind -x <text...>         only sessions whose cwd is EXACTLY $PWD —
+#                               no subdirectories (`-x -d <dir>` for another dir)
 #   ccfind [-d <dir>]           no query → list the most recent sessions
 #   ccfind -N <text...>         force the flat-list output (skip the picker)
 #   ccfind -r <text...>         also search the configured remote hosts
@@ -354,7 +356,7 @@ function ccfind() {
   emulate -L zsh   # consistent zsh defaults (glob qualifiers) regardless of caller
   setopt local_options no_notify no_monitor   # silent background ssh fan-out
   local max="${CCFIND_MAX:-10}"
-  local scope=""
+  local scope="" exact=0
   local interactive="${CCFIND_INTERACTIVE:-1}" interactive_forced=0
   local hosts_override="" local_only=0 remote=0 prof_filter="" color_override=""
   local emit="" verbose=0
@@ -371,6 +373,7 @@ function ccfind() {
   while [[ "$1" == -* ]]; do
     case "$1" in
       -d|--dir) scope="$2"; shift 2 ;;
+      -x|--exact) exact=1; shift ;;
       -n|--max) max="$2"; shift 2 ;;
       -i|--interactive) interactive=1; interactive_forced=1; shift ;;
       -N|--no-interactive) interactive=0; shift ;;
@@ -383,7 +386,9 @@ function ccfind() {
       --tsv) emit=tsv; shift ;;
       -v|--verbose) verbose=1; shift ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-n <max>] [-i|-N] [-r|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
+        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-r|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
+        echo "  -d <dir> scopes to that dir AND everything below it; -x/--exact narrows to"
+        echo "  that one dir only (no subdirectories), and defaults the dir to \$PWD"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  multi-profile (CCFIND_PROFILES): -p <label>, or a leading <label> arg, scopes to one profile"
@@ -475,6 +480,7 @@ function ccfind() {
     print -r -- '  "version": 1,'
     print -rn -- '  "query": '; _ccfind_json_str "$query"; print -r -- ','
     print -rn -- '  "scope": ';  _ccfind_json_str "$abs";   print -r -- ','
+    print -r -- "  \"scope_exact\": $( (( exact )) && print -n true || print -n false ),"
     print -r -- "  \"total\": ${total:-0},"
     print -r -- "  \"shown\": $(( ${total:-0} < max ? ${total:-0} : max )),"
     print -r -- "  \"truncated\": $( (( ${truncated:-0} )) && print -n true || print -n false ),"
@@ -593,13 +599,23 @@ function ccfind() {
   fi
 
   # Directory-scope encoding, shared by local and remote: Claude encodes a
-  # session's cwd as the dir name with every "/" turned into "-", so
-  # /home/user/code → -home-user-code. Scope by matching that encoded prefix
-  # exactly or as a parent (encoded + "-"). Note the abs path is resolved
-  # *locally* — with remote hosts, pass the path as it exists on them.
+  # session's cwd as the dir name with every character outside [a-zA-Z0-9]
+  # turned into "-", so /home/user/code → -home-user-code. It is NOT just "/"
+  # — a dot or an underscore is flattened the same way, which is why
+  # ~/.zsh/ccfind lands in -Users-me--zsh-ccfind (two dashes: one for the "/",
+  # one for the "."). Encoding only the slash silently matched nothing for
+  # every dotted or underscored path, `-d .` in a dotfile repo included.
+  #
+  # Scope then matches that encoded name exactly (-x) or as a parent as well
+  # (encoded + "-", the default subtree behaviour). Note the abs path is
+  # resolved *locally* — with remote hosts, pass the path as it exists there.
+  #
+  # -x with no -d means "here": the flag's whole point is the current dir, and
+  # requiring `-x -d .` would just be ceremony.
+  (( exact )) && [[ -z "$scope" ]] && scope=.
   if [[ -n "$scope" ]]; then
     abs="${scope:A}"                     # resolve . / symlinks / relative
-    enc="${abs//\//-}"
+    enc="${abs//[^a-zA-Z0-9]/-}"
   fi
 
   # Kick off the remote fan-out first so it overlaps with the local grep.
@@ -640,7 +656,7 @@ function ccfind() {
 # `zsh -f` skips the rc entirely (fast, and no surprises from someone's
 # prompt), and sourcing the file still auto-loads the .env beside it — which
 # is where that host's CCFIND_PROFILES lives.
-q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"
+q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"
 root="$HOME/.claude/projects"
 
 # The host's own config is the whole point of asking it, so make sure it is the
@@ -669,11 +685,16 @@ if command -v zsh >/dev/null 2>&1; then
     # its .env says. An older ccfind rejects --tsv and exits non-zero, which is
     # what moves us on to the next candidate — and, with none left, into the
     # fallback, so a fleet mid-upgrade degrades instead of erroring.
-    if [ -n "$dpath" ]; then
-      out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" --tsv -l -n "$max" -d "$dpath" -- "$q" 2>/dev/null)
-    else
-      out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" --tsv -l -n "$max" -- "$q" 2>/dev/null)
-    fi
+    # Rebuilding the arg list is safe here: every positional this worker was
+    # given is already saved in a named variable above.
+    set -- --tsv -l -n "$max"
+    [ -n "$dpath" ] && set -- "$@" -d "$dpath"
+    # A ccfind predating -x rejects it and exits 2 — which is exactly the
+    # "try the next candidate, else fall back" path below, and the fallback
+    # honours exact itself. So an old host narrows correctly instead of
+    # quietly widening to the whole subtree.
+    [ "$exact" = 1 ] && set -- "$@" -x
+    out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
     # Exit status alone decides, NOT whether anything came back: a search that
     # legitimately matched nothing is a successful remote search, and testing
     # for output would demote it to a fallback — a pointless second walk of the
@@ -701,7 +722,9 @@ else
   ep() { stat -f %m "$1"; }                                    # BSD
   mt() { stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$1"; }
 fi
-if [ -n "$enc" ]; then
+if [ -n "$enc" ] && [ "$exact" = 1 ]; then
+  files=$(find "$root/$enc" -maxdepth 1 -name '*.jsonl' -type f 2>/dev/null)
+elif [ -n "$enc" ]; then
   files=$(find "$root/$enc" "$root/$enc"-* -maxdepth 1 -name '*.jsonl' -type f 2>/dev/null)
 else
   files=$(find "$root" -mindepth 2 -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null)
@@ -737,7 +760,7 @@ RSEOF
     for h in "${remote_hosts[@]}"; do
       (
         command ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$h" \
-          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs}" \
+          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact}" \
           <<<"$_rscript" >"$rtmpdir/${h//\//_}.tsv" 2>/dev/null
         echo $? >"$rtmpdir/${h//\//_}.rc"
       ) &
@@ -792,7 +815,13 @@ RSEOF
     (( profiles_on )) && _pfxlabel="$_plabel" || _pfxlabel=""
     [[ -d "$_proot" ]] || continue
     local -a projdirs
-    if [[ -n "$enc" ]]; then
+    if [[ -n "$enc" ]] && (( exact )); then
+      # Just the one project dir. This is also the only scope mode that cannot
+      # over-match: `-d ~/code` picks up ~/code-scratch too (both encode to
+      # -Users-me-code-…, and the encoding cannot say which dash was a "/"),
+      # whereas an exact name is unambiguous.
+      projdirs=("$_proot/$enc"(N/))
+    elif [[ -n "$enc" ]]; then
       projdirs=("$_proot/$enc"(N/) "$_proot/$enc"-*(N/))
     else
       projdirs=("$_proot"/*(N/))
@@ -822,7 +851,11 @@ RSEOF
   # A -d scope that matched no project dir in any profile (and no remote host).
   if [[ -n "$enc" ]] && (( _projdir_total == 0 && ${#remote_hosts} == 0 )); then
     [[ -n "$emit" ]] && { _ccfind_emit; return 0 }
-    echo "No sessions recorded under $abs"
+    if (( exact )); then
+      echo "No sessions recorded in $abs itself (-x excludes subdirectories)"
+    else
+      echo "No sessions recorded under $abs"
+    fi
     return 0
   fi
 
@@ -886,7 +919,7 @@ RSEOF
     [[ -n "$query" ]] && _what+=("query \"$query\"")
     (( profiles_on )) && _what+=("profiles: ${(j:, :)prof_labels}")
     (( ${#remote_hosts} > 0 )) && _what+=("hosts: ${(j:, :)remote_hosts}")
-    [[ -n "$abs" ]] && _what+=("under $abs")
+    [[ -n "$abs" ]] && { (( exact )) && _what+=("in $abs only") || _what+=("under $abs") }
     (( ${#_what} > 0 )) && print -r -- "${_CCF_DIM}   ${(j: · :)_what}${_CCF_OFF}"
     return 0
   fi

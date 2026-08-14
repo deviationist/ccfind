@@ -39,6 +39,64 @@ setup() { ccfind_setup; }
   refute_contains "$output" "/proj/other"
 }
 
+@test "-d scopes a dotted path (encoding flattens the dot, not only the slash)" {
+  mk_session "$FIXHOME/.claude" "/proj/me/.zsh/tool" z1 "term"
+  mk_session "$FIXHOME/.claude" "/proj/me/other"     o1 "term"
+  run_ccfind -N -d /proj/me/.zsh/tool term
+  [ "$status" -eq 0 ]
+  # Assert on the resume line, not on the path: the "no sessions recorded
+  # under <dir>" message quotes the path back too, so a path-only assertion
+  # passes even when the scope matched nothing.
+  assert_contains "$output" "claude --resume z1"
+  refute_contains "$output" "/proj/me/other"
+}
+
+@test "-x scopes to the exact dir, excluding its subdirectories" {
+  mk_session "$FIXHOME/.claude" "/proj/keep"     k1 "term"
+  mk_session "$FIXHOME/.claude" "/proj/keep/sub" s1 "term"
+  run_ccfind -N -x -d /proj/keep term
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "/proj/keep"
+  refute_contains "$output" "/proj/keep/sub"
+}
+
+@test "-d without -x still includes the subdirectories" {
+  mk_session "$FIXHOME/.claude" "/proj/keep"     k1 "term"
+  mk_session "$FIXHOME/.claude" "/proj/keep/sub" s1 "term"
+  run_ccfind -N -d /proj/keep term
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "/proj/keep/sub"
+}
+
+@test "-x with no -d means the current directory" {
+  local here; here="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/here"
+  mkdir -p "$here/sub"
+  mk_session "$FIXHOME/.claude" "$here"     h1 "term"
+  mk_session "$FIXHOME/.claude" "$here/sub" s1 "term"
+  run_ccfind_in "$here" -N -x term
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "$here"
+  refute_contains "$output" "$here/sub"
+}
+
+@test "-x does not over-match a sibling that shares the encoded prefix" {
+  # /proj/keep and /proj/keep-scratch both encode to -proj-keep… — the subtree
+  # glob cannot tell them apart, the exact name can.
+  mk_session "$FIXHOME/.claude" "/proj/keep"         k1 "term"
+  mk_session "$FIXHOME/.claude" "/proj/keep-scratch" x1 "term"
+  run_ccfind -N -x -d /proj/keep term
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "/proj/keep"
+  refute_contains "$output" "/proj/keep-scratch"
+}
+
+@test "-x with nothing in that dir says so, and says why" {
+  mk_session "$FIXHOME/.claude" "/proj/keep/sub" s1 "term"
+  run_ccfind -N -x -d /proj/keep term
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "No sessions recorded in /proj/keep itself"
+}
+
 @test "multi-profile: union searches both, tags each hit with its label" {
   mk_session "$BATS_TEST_TMPDIR/work" "/w/a" w1 "shared-term work-side"
   mk_session "$BATS_TEST_TMPDIR/personal" "/p/a" p1 "shared-term personal-side"
@@ -741,6 +799,29 @@ OLD
   assert_equal "$status" 0
   assert_contains "$output" "/srv/keep"
   refute_contains "$output" "/srv/other"
+}
+
+@test "-x scopes the remote search too" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/keep"     K1 "termx"
+  mk_session "$REMOTE_HOME/.claude" "/srv/keep/sub" S1 "termx"
+  run_ccfind -H nas -N -x -d /srv/keep termx
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/keep"
+  refute_contains "$output" "/srv/keep/sub"
+}
+
+@test "-x narrows on a host whose ccfind is too old for the flag" {
+  # The stub host answers from the worker's own fallback path (no ccfind
+  # there at all), which is the same code an old ccfind degrades into.
+  install_ssh_stub_real_host
+  rm -f "$REMOTE_CCFIND_DIR/ccfind.zsh"
+  mk_session "$REMOTE_HOME/.claude" "/srv/keep"     K1 "termx"
+  mk_session "$REMOTE_HOME/.claude" "/srv/keep/sub" S1 "termx"
+  run_ccfind -H nas -N -x -d /srv/keep termx
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/keep"
+  refute_contains "$output" "/srv/keep/sub"
 }
 
 @test "--json reports a remote hit with its host and remote config dir" {

@@ -38,6 +38,8 @@ Optional per-machine config lives in a gitignored `.env` beside `ccfind.zsh` —
 ccfind <text...>                   # literal, case-insensitive search of all sessions
 ccfind -d <dir> <text...>          # only sessions whose cwd is <dir> or below it
 ccfind -d . <text...>              # scope to the current directory's subtree
+ccfind -x <text...>                # only sessions whose cwd is EXACTLY $PWD (no subdirs)
+ccfind -x -d <dir> <text...>       # same, for a directory other than $PWD
 ccfind -n <max> <text...>          # cap the number of hits shown (default 10)
 ccfind -N <text...>                # force the flat-list output (opt out of the picker)
 ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0 + the TTY check)
@@ -99,10 +101,40 @@ when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`
 ```zsh
 ccfind "connection refused"      # picker (if fzf+TTY) over the hits
 ccfind -d ~/code/myproject       # everything done in that repo, newest first
+ccfind -x                        # only sessions started right here, nothing from subdirs
 ccfind -n 50 deploy              # show up to 50 hits (same as CCFIND_MAX=50)
 ccfind -N deploy                 # flat-list output, copy/paste the resume command
 ccfind deploy | less             # auto-flat-list (no TTY on stdout)
 ```
+
+## Directory scope: `-d` vs `-x`
+
+Both narrow the search to a directory; they differ in whether the directory's
+subtree comes along.
+
+| | matches | typical use |
+|---|---|---|
+| `-d <dir>` | `<dir>` **and every directory below it** | "anything I did in this repo, or any repo under `~/code`" |
+| `-x` (`--exact`) | `<dir>` **only** — no subdirectories | "just the sessions started right here" |
+
+`-x` defaults its directory to `$PWD`, so `ccfind -x` needs no `-d`; pass
+`-x -d <dir>` to pin another one. Neither flag looks at the files in the
+directory — the scope is the working directory a session was *started* in, as
+recorded in its transcript.
+
+Why the distinction earns a flag: with `-d`, hits from the directory itself are
+**not** separated out. Everything found in the subtree is merged into one list
+sorted newest-first, and they all compete for the same `-n` slots (default 10) —
+so from `~/code`, a handful of busy sub-repos can push every session started in
+`~/code` itself off the end of the list, and the only thing distinguishing them
+is the directory column you have to read. `-x` removes them from the search
+instead of leaving you to spot them.
+
+`-x` is also the one scope mode that cannot over-match. Claude Code names each
+project directory after the session's cwd with every non-alphanumeric character
+flattened to `-`, so `~/code` and `~/code-scratch` both encode to
+`-Users-me-code…` and a subtree match can't tell a former `/` from a literal
+`-`. An exact name has no such ambiguity.
 
 ## Colour
 
@@ -218,9 +250,11 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
   `.env`. `-r` with no list configured warns on stderr and searches locally.
 - **Failure is soft:** an unreachable host prints one
   `ccfind: remote search failed on: <host>` line to stderr and the rest still show.
-- **`-d <dir>` scoping** applies to the remotes too, but the path is resolved
+- **`-d <dir>` / `-x` scoping** applies to the remotes too, but the path is resolved
   *locally* and matched as-is on each host — useful when the path exists on the
-  hosts, a no-op filter otherwise.
+  hosts, a no-op filter otherwise. A host running a ccfind too old to know `-x`
+  still narrows correctly: it declines the flag, and the worker's built-in
+  fallback search applies the exact scope itself.
 
 ### Profiles on remote hosts
 
@@ -275,6 +309,7 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
   "version": 1,
   "query": "connection refused",
   "scope": "",
+  "scope_exact": false,
   "total": 6,
   "shown": 6,
   "truncated": false,
@@ -289,7 +324,9 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
 }
 ```
 
-`host` is `local` or the ssh alias; `profile` is empty on a machine with no profiles
+`scope` is the resolved `-d` directory (empty when unscoped) and `scope_exact` says
+whether `-x` restricted it to that directory alone. `host` is `local` or the ssh
+alias; `profile` is empty on a machine with no profiles
 configured; `config_dir` is the dir that hit belongs to, *on that machine*, which is
 what a consumer needs to resume it into the right seat. The document is well-formed
 even when nothing matched (`"results": []`) — and JSON output never opens the picker
