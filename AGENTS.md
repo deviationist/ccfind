@@ -12,6 +12,7 @@ Config auto-loads from a gitignored `.env` beside the script (see `.env.example`
 ```
 ccfind [text...]                   literal, case-insensitive; newest-first
   -d <dir>     scope to sessions whose cwd is <dir> or below
+  -x           exact scope: that dir ONLY, no subdirs (dir defaults to $PWD)
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
@@ -41,7 +42,14 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   default profile only, quiet; `-v` reports which path each host took. Both live in
   ONE connection — a capability probe would double the ssh cost. The remote call
   `unset`s inherited `CCFIND_*` so only the host's config applies.
-- **Machine output:** `--json` (envelope: version/query/scope/total/shown/truncated/
+- **Dir scope:** a project dir is named after the session's cwd with every
+  non-alphanumeric char flattened to `-` (`~/.zsh/x` → `-Users-me--zsh-x` — the dot
+  counts, not just the slash). `-d` matches that name *and* `name-*`, i.e. the
+  subtree, which cannot distinguish `~/code/sub` from a sibling `~/code-sub`; `-x`
+  matches the one name and is therefore unambiguous. Subtree hits are merged into
+  the single newest-first list and share the `-n` budget, so sessions from the dir
+  itself can be crowded out by busier sub-dirs — that is what `-x` is for.
+- **Machine output:** `--json` (envelope: version/query/scope/scope_exact/total/shown/truncated/
   results[]) and `--tsv` (the wire record, host column dropped — the caller knows the
   alias it dialled). Both imply no picker and no colour, and stay well-formed with
   zero results: a sentence where a document belongs would be parsed as a record.
