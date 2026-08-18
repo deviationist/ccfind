@@ -65,7 +65,12 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   Both work on remote hosts too, since the host runs its own ccfind and resolves its
   own seats. Unions the dirs, tags each hit with its label. `ccfind foo` = all profiles;
   `ccfind <label> foo` / `-p <label>` = one. Resume runs under that profile
-  (`CLAUDE_CONFIG_DIR=<dir> claude --resume`). Unset → single `~/.claude` (unchanged).
+  (`CLAUDE_CONFIG_DIR=<dir> claude --resume`) — except when that dir IS the default
+  `~/.claude`, which resumes with the variable unset: setting it also moves the
+  global `.claude.json` into the config dir, so pinning the default seat lands on a
+  never-onboarded `~/.claude/.claude.json` and opens the setup wizard. Remote hits
+  carry the same test, resolved against the *host's* `$HOME` inside the ssh command.
+  Unset → single `~/.claude` (unchanged).
 - **Colour:** roles, not decoration — cyan = local profile label, magenta = remote
   host, bold yellow = the search term inside every snippet (list, picker and preview),
   green = the resume command, dim = timestamps/separators. Off whenever stdout is not

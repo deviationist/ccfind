@@ -18,6 +18,13 @@ ccfind_setup() {
   # Fixture HOME; the default (unconfigured) profile is $FIXHOME/.claude.
   export FIXHOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$FIXHOME/.claude/projects"
+  # ...and the file a real machine actually has, in the place it actually has
+  # it: the GLOBAL config lives at ~/.claude.json, BESIDE ~/.claude, not inside
+  # it. Modelling that asymmetry is the whole point — ~/.claude/.claude.json is
+  # the file that does NOT exist on a normal machine, and pointing
+  # CLAUDE_CONFIG_DIR at ~/.claude is what conjures it and triggers the
+  # first-run wizard. A fixture without this cannot tell the two apart.
+  mk_global_config "$FIXHOME/.claude.json"
 
   export CCFIND_INTERACTIVE=0     # always the flat list — deterministic, no TTY
   unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX
@@ -25,6 +32,35 @@ ccfind_setup() {
   # profile-switching wrapper) has CLAUDE_CONFIG_DIR exported; it would be
   # inherited by an executed resume line and mask what ccfind actually emits.
   unset CLAUDE_CONFIG_DIR
+}
+
+# ccfind_teardown — the counterpart to ccfind_setup, run after every test.
+# Every stub, fixture and fake HOME already lives under $BATS_TEST_TMPDIR, which
+# bats creates and destroys per test, and PATH/CCFIND_*/FZF_* are process state
+# that dies with the test — so this is a belt-and-braces sweep of the fake bin
+# plus one assertion that the isolation held: a fixture HOME that ever escaped
+# $BATS_TEST_TMPDIR would mean the suite had been writing into a real ~/.claude.
+ccfind_teardown() {
+  case "$FIXHOME" in
+    "$BATS_TEST_TMPDIR"/*) ;;
+    *) printf 'isolation breach: FIXHOME=%s is outside %s\n' "$FIXHOME" "$BATS_TEST_TMPDIR" >&2
+       return 1 ;;
+  esac
+  rm -rf "$BATS_TEST_TMPDIR/bin"
+}
+
+# mk_global_config <path> — Claude Code's global config, onboarded. Only the
+# fields this suite reasons about; the real file carries ~90 more.
+mk_global_config() {
+  mkdir -p "${1%/*}"
+  cat > "$1" <<'JSON'
+{
+  "hasCompletedOnboarding": true,
+  "numStartups": 42,
+  "userID": "fixture",
+  "projects": {}
+}
+JSON
 }
 
 # mk_session <config-dir> <cwd> <id> <text>
@@ -38,6 +74,15 @@ mk_session() {
   local enc="${cwd//[^a-zA-Z0-9]/-}"
   mkdir -p "$root/projects/$enc"
   printf '{"cwd":"%s","text":"%s"}\n' "$cwd" "$text" > "$root/projects/$enc/$id.jsonl"
+  # A seat that is NOT the default one was set up deliberately, so on a real
+  # machine it has its own onboarded .claude.json inside it. A default seat
+  # (<home>/.claude) does not — its global config sits beside it as
+  # <home>/.claude.json. Getting this backwards is exactly the bug, so the
+  # fixture reproduces the asymmetry rather than papering over it.
+  case "$root" in
+    */.claude) ;;
+    *) [ -f "$root/.claude.json" ] || mk_global_config "$root/.claude.json" ;;
+  esac
 }
 
 # run_ccfind <ccfind-args...> — run ccfind in an isolated zsh with the fixture
@@ -54,11 +99,35 @@ run_ccfind_in() {
     _ "$dir" "$CCFIND_ZSH" "$@"
 }
 
+# _stub_claim <path> — claim a name on the fake PATH, refusing to overwrite a
+# stub that is already there. Two installers write `ssh` (canned host vs. real
+# host) and two write `fzf` (cancel vs. select), so a test that calls both would
+# silently get whichever ran last and quietly exercise a stub it never asked
+# for. Bats runs test bodies under `set -e`, so failing here aborts the test
+# with the conflict named instead of producing a confusing assertion later.
+_stub_claim() {
+  if [ -e "$1" ]; then
+    printf 'stub conflict: %s already installed — a test may install only one %s stub\n' \
+      "$1" "$(basename "$1")" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$1")"
+}
+
+# _stub_path_add <dir> — put the fake bin on PATH once, however many stubs a
+# test installs.
+_stub_path_add() {
+  case ":$PATH:" in
+    *":$1:"*) ;;
+    *) export PATH="$1:$PATH" ;;
+  esac
+}
+
 # install_ssh_stub — shadow `ssh` with a stub that answers as a host WITHOUT
 # ccfind: the worker's fallback header, then one record in the wire format.
 # ccfind calls `command ssh`, which honors PATH.
 install_ssh_stub() {
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  _stub_claim "$BATS_TEST_TMPDIR/bin/ssh" || return 1
   cat > "$BATS_TEST_TMPDIR/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
 # header, then: epoch \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path
@@ -68,7 +137,7 @@ printf '1700000000\t\t/root/.claude\tRID123\t/remote/proj\t2024-01-01 12:00:00\t
 exit 0
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
-  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
 }
 
 # install_ssh_stub_real_host — shadow `ssh` with a stub that runs the remote
@@ -81,10 +150,11 @@ STUB
 #
 # Sets REMOTE_HOME (with the two profiles seeded) for the test to write into.
 install_ssh_stub_real_host() {
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  _stub_claim "$BATS_TEST_TMPDIR/bin/ssh" || return 1
   export REMOTE_HOME="$BATS_TEST_TMPDIR/remote-home"
   export REMOTE_CCFIND_DIR="$BATS_TEST_TMPDIR/remote-ccfind"
   mkdir -p "$REMOTE_HOME" "$REMOTE_CCFIND_DIR"
+  mk_global_config "$REMOTE_HOME/.claude.json"   # as on a real host: beside ~/.claude
   cp "$CCFIND_SRC" "$REMOTE_CCFIND_DIR/ccfind.zsh"
   # The host's own profile config, where a real install keeps it: a .env beside
   # the script. This is the thing the caller cannot know and must ask for.
@@ -109,7 +179,7 @@ case "$cmd" in
 esac
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/ssh"
-  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
 }
 
 # install_ssh_stub_bare_host — the same, but with no ccfind installed on the
@@ -125,10 +195,25 @@ install_ssh_stub_bare_host() {
 # string-matching the line. (Mirrors the receiving-end wrapper in
 # claude-profile, which honors a caller-set CLAUDE_CONFIG_DIR verbatim.)
 install_claude_stub() {
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  _stub_claim "$BATS_TEST_TMPDIR/bin/claude" || return 1
   cat > "$BATS_TEST_TMPDIR/bin/claude" <<'STUB'
 #!/usr/bin/env bash
-echo "CLAUDE argv=[$*] dir=[${CLAUDE_CONFIG_DIR-<unset>}] pwd=[$PWD]"
+# Where Claude Code looks for its GLOBAL config, as observed in the field:
+# $CLAUDE_CONFIG_DIR/.claude.json when that variable is set, $HOME/.claude.json
+# when it is not. A file that is missing, or present without
+# hasCompletedOnboarding, is what puts the real thing into the first-run setup
+# wizard (theme picker) instead of the session — the failure this suite exists
+# to prevent. Reporting that verdict lets a test assert the SYMPTOM, not just
+# the environment variable that causes it.
+cfg="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+if [ ! -f "$cfg" ]; then
+  verdict=SETUP-WIZARD
+elif grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' "$cfg"; then
+  verdict=RESUMED
+else
+  verdict=SETUP-WIZARD
+fi
+echo "CLAUDE argv=[$*] dir=[${CLAUDE_CONFIG_DIR-<unset>}] pwd=[$PWD] config=[$cfg] verdict=[$verdict]"
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/claude"
 }
@@ -146,7 +231,7 @@ run_resume() {
 # driven with no terminal and nothing selected, so what the picker *would*
 # display is assertable. Same trick the README-SVG generator uses.
 install_fzf_stub() {
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  _stub_claim "$BATS_TEST_TMPDIR/bin/fzf" || return 1
   export FZF_ROWS="$BATS_TEST_TMPDIR/fzf-rows" FZF_ARGV="$BATS_TEST_TMPDIR/fzf-argv"
   export FZF_TABS="$BATS_TEST_TMPDIR/fzf-tabs"
   cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
@@ -168,7 +253,7 @@ cat > "$FZF_ROWS"
 exit 130
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
-  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
 }
 
 # --- assertions -------------------------------------------------------------
@@ -207,7 +292,7 @@ assert_equal() {      # <actual> <expected>
 # machine and a fake remote one (the stub is on PATH for both).
 install_claude_profile_stub() {
   local bindir="${1:-$BATS_TEST_TMPDIR/bin}"
-  mkdir -p "$bindir"
+  _stub_claim "$bindir/claude-profile" || return 1
   cat > "$bindir/claude-profile" <<'STUB'
 #!/bin/sh
 [ "$1" = list ] || exit 2
@@ -215,7 +300,7 @@ printf 'daily\t%s/.claude\n' "$HOME"
 printf 'client\t%s/.claude-work\tactive\n' "$HOME"
 STUB
   chmod +x "$bindir/claude-profile"
-  export PATH="$bindir:$PATH"
+  _stub_path_add "$bindir"
 }
 
 # run_preview <host> <file> [query] — render the fzf preview pane for a
@@ -247,7 +332,7 @@ mk_transcript() {
 # stub never reaches. ANSI is stripped the way `fzf --ansi` strips it, so the
 # row handed back is shaped exactly like the real one.
 install_fzf_stub_select() {
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  _stub_claim "$BATS_TEST_TMPDIR/bin/fzf" || return 1
   export FZF_PICK="${1:-1}"
   cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'STUB'
 #!/usr/bin/env bash
@@ -256,7 +341,7 @@ sed -n "${FZF_PICK}p" | sed $'s/\033\\[[0-9;]*m//g'
 exit 0
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
-  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
 }
 
 # mk_tabsdir <dir> <view...> — the state directory the tab bindings work over.

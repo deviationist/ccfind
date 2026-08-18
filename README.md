@@ -207,7 +207,12 @@ ccfind: profiles: claude-profile → work, personal
   multi-profile is off.
 - **Correct resume.** Resuming a hit runs it under its own profile
   (`CLAUDE_CONFIG_DIR=<that dir> claude --resume <id>`), so a personal session
-  reopens in the personal profile regardless of where you launched `ccfind`.
+  reopens in the personal profile regardless of where you launched `ccfind`. The
+  one exception is a profile whose dir *is* the default `~/.claude`: it keeps its
+  label but resumes with nothing set, because `CLAUDE_CONFIG_DIR` also relocates
+  the global `.claude.json` — naming the default dir would send Claude Code to an
+  `~/.claude/.claude.json` that has never been onboarded, and open the first-run
+  setup wizard instead of the session.
 - **Profiles + hosts compose.** With both `CCFIND_PROFILES` and `CCFIND_HOSTS` set,
   `ccfindr foo` searches every local profile *and* every remote host; tabs become
   `All │ work │ personal │ <host>…`. Remote hosts have profiles of their own — see
