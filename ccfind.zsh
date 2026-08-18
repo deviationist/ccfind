@@ -448,6 +448,18 @@ function ccfind() {
   # A row's own machine: "local" is this one, anything else is an ssh alias.
   _ccfind_is_local() { [[ "$1" == local ]] }
 
+  # Whether a hit's config dir has to be named on the resume line. Naming
+  # $HOME/.claude — the dir claude falls back to when the variable is unset —
+  # is NOT the no-op it looks like: CLAUDE_CONFIG_DIR also relocates the global
+  # .claude.json, from $HOME/.claude.json to $CLAUDE_CONFIG_DIR/.claude.json.
+  # That second file has never been through onboarding, so pinning the default
+  # seat drops you into the first-run setup wizard instead of the session. The
+  # default seat therefore resumes with nothing set, exactly as a bare
+  # `claude --resume` would — it keeps its label, it just stops being exported.
+  _ccfind_pin_cfgdir() {   # <cfgdir> → true when it must be exported
+    [[ -n "$1" && "${1%/}" != "${HOME%/}/.claude" ]]
+  }
+
   # ---- machine-readable output ---------------------------------------------
   # Same records the picker and the list are built from, handed over verbatim.
   # --tsv is the wire format the remote worker speaks (and the reason a host
@@ -952,8 +964,15 @@ RSEOF
     # A profile means the hit came from a host that runs ccfind and told us
     # which of its seats this session lives in — so pin it, exactly as the
     # local path does. No profile means the default seat: set nothing.
+    #
+    # $4 is the *host's* config dir, so whether it names that host's default
+    # seat is a question only that host can answer — hence the test travels
+    # with the command and resolves against the remote $HOME. Same reason as
+    # _ccfind_pin_cfgdir locally: naming the default dir would send claude to a
+    # .claude.json that has never been onboarded.
     local _inner="claude --resume $2"
-    [[ -n "${3:-}" && -n "${4:-}" ]] && _inner="CLAUDE_CONFIG_DIR=${(q)4} $_inner"
+    [[ -n "${3:-}" && -n "${4:-}" ]] && \
+      _inner="[ ${(q)4} = \"\$HOME/.claude\" ] || export CLAUDE_CONFIG_DIR=${(q)4}; $_inner"
     if [[ -n "$1" && "$1" != "?" ]]; then
       _rcmd="cd ${(q)1} && exec \"\$SHELL\" -ic ${(q)_inner}"
     else
@@ -1124,9 +1143,9 @@ RSEOF
       cd "$_cwd" || { echo "ccfind: cd to $_cwd failed" >&2; return 1; }
     fi
     # The row carries its own config dir, so the seat comes off the hit rather
-    # than off a lookup — and an unlabelled hit sets nothing, which is what
-    # leaves claude-profile free to do its own launch-time routing.
-    if [[ -n "$_profile" ]]; then
+    # than off a lookup — and a hit on the default seat sets nothing, which is
+    # what leaves claude-profile free to do its own launch-time routing.
+    if _ccfind_pin_cfgdir "$_cfgdir"; then
       CLAUDE_CONFIG_DIR="$_cfgdir" claude --resume "$_id"
     else
       claude --resume "$_id"
@@ -1158,7 +1177,7 @@ RSEOF
         _tag=""
       fi
       local _pfx=""
-      [[ -n "$_profile" ]] && _pfx="CLAUDE_CONFIG_DIR=${(q)_cfgdir} "
+      _ccfind_pin_cfgdir "$_cfgdir" && _pfx="CLAUDE_CONFIG_DIR=${(q)_cfgdir} "
       if [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
         resume="cd ${(q)_cwd} && ${_pfx}claude --resume $_id"
       else

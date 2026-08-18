@@ -4,6 +4,7 @@
 load helpers
 
 setup() { ccfind_setup; }
+teardown() { ccfind_teardown; }
 
 @test "default: searches ~/.claude, no profile labels, plain resume" {
   mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
@@ -270,19 +271,38 @@ setup() { ccfind_setup; }
   assert_contains "$output" "dir=[<unset>]"
 }
 
-@test "single-profile: one configured profile that IS present still labels and pins the dir" {
-  # Current behavior, pinned deliberately: profiles_on flips on for a single
-  # surviving profile, so hits carry its label and the resume line presets
-  # CLAUDE_CONFIG_DIR. Correct seat either way — but note that a preset dir
-  # makes claude-profile's wrapper step fully aside (no launch-time
-  # auto-rotation), which is why the all-absent case above must NOT do this.
+@test "single-profile: one configured profile that IS present still labels the hit" {
+  # profiles_on flips on for a single surviving profile, so hits carry its
+  # label — and note that a preset dir makes claude-profile's wrapper step
+  # fully aside (no launch-time auto-rotation), which is why the all-absent
+  # case above must NOT do this.
   mkdir -p "$BATS_TEST_TMPDIR/proj"
   mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
   export CCFIND_PROFILES="work:$FIXHOME/.claude personal:$BATS_TEST_TMPDIR/gone"
   run_ccfind -N term
   [ "$status" -eq 0 ]
   assert_contains "$output" "work:$BATS_TEST_TMPDIR/proj"
-  assert_contains "$output" "CLAUDE_CONFIG_DIR=$FIXHOME/.claude claude --resume s1"
+}
+
+@test "a profile pointing at the default ~/.claude is labelled but never exported" {
+  # CLAUDE_CONFIG_DIR is not a no-op when it names the dir claude would have
+  # used anyway: it also moves the global .claude.json to
+  # $CLAUDE_CONFIG_DIR/.claude.json, a file that has never been onboarded — so
+  # exporting the default seat opens the first-run setup wizard instead of the
+  # session. Label it, don't export it.
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
+  export CCFIND_PROFILES="work:$FIXHOME/.claude"
+  run_ccfind -N term
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "work:$BATS_TEST_TMPDIR/proj"
+  refute_contains "$output" "CLAUDE_CONFIG_DIR"
+  local line; line="$(resume_line_from_output)"
+  install_claude_stub
+  run_resume "$line"
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "argv=[--resume s1]"
+  assert_contains "$output" "dir=[<unset>]"
 }
 
 # --- colour ----------------------------------------------------------------
@@ -500,6 +520,49 @@ setup() { ccfind_setup; }
   assert_contains "$output" "claude\\ --resume\\ R2"
 }
 
+# remote_resume_inner — the command the emitted `ssh -t <host> …` line would
+# hand to the shell on the far end, unquoted one layer at a time by the shell
+# that quoted it. Lets a test RUN the far-end command under the remote $HOME
+# instead of only string-matching the line.
+remote_resume_inner() {
+  local line rcmd
+  line="$(printf '%s\n' "$output" | grep -m1 -- 'ssh -t ')"
+  rcmd="$(bash -c "printf '%s' ${line#ssh -t * }")"
+  printf '%s' "${rcmd#*-ic }"
+}
+
+@test "a remote hit on the host's own default seat is labelled but never exported" {
+  # The dir travels with the command, but behind a test the HOST resolves —
+  # only it knows what its $HOME is. Naming its default seat would relocate
+  # .claude.json to ~/.claude/.claude.json, a file that has never been through
+  # onboarding, so the resume would open the setup wizard instead of the
+  # session. (rwork is exactly that seat: $REMOTE_HOME/.claude.)
+  install_ssh_stub_real_host
+  install_claude_stub
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "remote deploy work"
+  run_ccfind -H nas -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "nas:rwork:/srv/app"
+  local inner; inner="$(remote_resume_inner)"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$REMOTE_HOME" bash -c "eval $inner"
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume R1]"
+  assert_contains "$output" "dir=[<unset>]"
+}
+
+@test "a remote hit on a non-default seat really does export it over there" {
+  install_ssh_stub_real_host
+  install_claude_stub
+  mk_session "$REMOTE_HOME/.claude-personal" "/srv/side" R2 "remote deploy personal"
+  run_ccfind -H nas -N deploy
+  assert_equal "$status" 0
+  local inner; inner="$(remote_resume_inner)"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$REMOTE_HOME" bash -c "eval $inner"
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume R2]"
+  assert_contains "$output" "dir=[$REMOTE_HOME/.claude-personal]"
+}
+
 @test "a remote host without ccfind falls back to ~/.claude, quietly" {
   install_ssh_stub_bare_host
   mk_session "$REMOTE_HOME/.claude"          "/srv/app"  R1 "remote deploy work"
@@ -566,6 +629,40 @@ setup() { ccfind_setup; }
   mk_session "$FIXHOME/.claude-work" "/a/two" C1 "deploy client"
   run_ccfind -N deploy
   assert_contains "$output" "CLAUDE_CONFIG_DIR=$FIXHOME/.claude-work claude --resume C1"
+}
+
+@test "a discovered profile that IS the default seat resumes without exporting it" {
+  # The shape that actually shipped broken: claude-profile reports one seat,
+  # `daily -> ~/.claude`, so every hit is labelled and the old rule ("labelled
+  # => export") pinned CLAUDE_CONFIG_DIR at the dir claude would have used
+  # anyway. That is not a no-op — it moves the global .claude.json to
+  # ~/.claude/.claude.json, which has never been onboarded — so every resume
+  # opened the first-run setup wizard instead of the session.
+  install_claude_profile_stub
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" D1 "deploy daily"
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "daily:$BATS_TEST_TMPDIR/proj"   # still labelled
+  refute_contains "$output" "CLAUDE_CONFIG_DIR"
+  local line; line="$(resume_line_from_output)"
+  run_resume "$line"
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume D1]"
+  assert_contains "$output" "dir=[<unset>]"
+}
+
+@test "a profile dir with a trailing slash is still recognised as the default seat" {
+  # ~/.claude/ and ~/.claude are the same seat; only a string compare thinks
+  # otherwise, and getting that wrong reopens the setup-wizard bug.
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" s1 "term"
+  export CCFIND_PROFILES="work:$FIXHOME/.claude/"
+  run_ccfind -N term
+  assert_equal "$status" 0
+  assert_contains "$output" "work:$BATS_TEST_TMPDIR/proj"
+  refute_contains "$output" "CLAUDE_CONFIG_DIR"
 }
 
 @test "CCFIND_PROFILES wins over claude-profile" {
@@ -911,6 +1008,21 @@ print("close" if 0 < lead <= 14 else f"far:{lead}")' <<<"$disp"
   assert_contains "$output" "dir=[$BATS_TEST_TMPDIR/personal]"
 }
 
+@test "Enter on a profile hit whose seat is the default sets nothing" {
+  # The picker builds its resume separately from the flat list, and the picker
+  # is how this is reached in practice — so the default-seat rule is pinned at
+  # BOTH call sites, not just the one that prints a line.
+  install_fzf_stub_select
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" P1 "termx"
+  export CCFIND_PROFILES="personal:$FIXHOME/.claude"
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume P1]"
+  assert_contains "$output" "dir=[<unset>]"
+}
+
 @test "Enter on a remote hit goes over ssh with that host's seat" {
   # The row's own config dir travels with it, so the far end opens the seat the
   # session belongs to rather than whatever that host defaults to.
@@ -1011,4 +1123,117 @@ STALE
   assert_equal "$status" 0
   assert_contains "$output" "no usable ccfind (incompatible)"
   assert_contains "$output" "nas:/srv/app"        # still searched, the old way
+}
+
+# --- the setup wizard, at the level a human notices it ----------------------
+# Everything above asserts the MECHANISM (whether CLAUDE_CONFIG_DIR is set).
+# These assert the SYMPTOM: whether the launched claude would find an onboarded
+# global config or drop the user into the first-run theme picker. The fixture
+# models a real machine's layout — ~/.claude.json beside ~/.claude, nothing
+# inside ~/.claude — so the wizard is reachable in the suite without any real
+# file being read or written.
+
+@test "the fixture really can detect the wizard (negative control)" {
+  # Guards the guard: if this ever stops failing, every RESUMED assertion below
+  # has become vacuous and the suite is testing nothing.
+  install_claude_stub
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$FIXHOME" \
+      CLAUDE_CONFIG_DIR="$FIXHOME/.claude" claude --resume X1
+  assert_contains "$output" "config=[$FIXHOME/.claude/.claude.json]"
+  assert_contains "$output" "verdict=[SETUP-WIZARD]"
+}
+
+@test "the same launch without the variable finds the real config (control)" {
+  install_claude_stub
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$FIXHOME" claude --resume X1
+  assert_contains "$output" "config=[$FIXHOME/.claude.json]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "resuming a default-seat hit lands in the session, not the setup wizard" {
+  install_claude_profile_stub          # reports daily -> ~/.claude, the field shape
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" D1 "deploy daily"
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  local line; line="$(resume_line_from_output)"
+  run_resume "$line"
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume D1]"
+  assert_contains "$output" "config=[$FIXHOME/.claude.json]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "Enter in the picker on a default-seat hit lands in the session too" {
+  install_fzf_stub_select
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" P1 "termx"
+  export CCFIND_PROFILES="personal:$FIXHOME/.claude"
+  run_ccfind -i termx
+  assert_equal "$status" 0
+  assert_contains "$output" "argv=[--resume P1]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "a genuine alternate seat resumes into its own onboarded config" {
+  # The other half of the contract: not exporting the default seat must not
+  # cost a real second seat its routing.
+  install_claude_stub
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/proj" P2 "termx"
+  export CCFIND_PROFILES="personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -N termx
+  local line; line="$(resume_line_from_output)"
+  run_resume "$line"
+  assert_equal "$status" 0
+  assert_contains "$output" "config=[$BATS_TEST_TMPDIR/personal/.claude.json]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "a remote default-seat hit lands in the session on the far end" {
+  install_ssh_stub_real_host
+  install_claude_stub
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "remote deploy work"
+  run_ccfind -H nas -N deploy
+  assert_equal "$status" 0
+  local inner; inner="$(remote_resume_inner)"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HOME="$REMOTE_HOME" bash -c "eval $inner"
+  assert_equal "$status" 0
+  assert_contains "$output" "config=[$REMOTE_HOME/.claude.json]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+# --- the harness itself -----------------------------------------------------
+# The stubs shadow real commands on PATH, so a stub quietly replacing another
+# stub means a test exercises something it never asked for — and the assertion
+# that then fails points at ccfind rather than at the harness.
+
+@test "a second stub of the same name is a hard failure, not a silent overwrite" {
+  install_fzf_stub                       # the cancelling fzf claims the name
+  run install_fzf_stub_select            # the selecting one wants the same name
+  assert_equal "$status" 1
+  assert_contains "$output" "stub conflict"
+  assert_contains "$output" "fzf"
+  # ...and the first stub is still the one on PATH, unmodified: it cancels (130)
+  # rather than selecting (0), which is what the conflicting stub would have done.
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c 'echo row | fzf'
+  assert_equal "$status" 130
+}
+
+@test "the two ssh stubs cannot both claim the name either" {
+  install_ssh_stub
+  run install_ssh_stub_real_host
+  assert_equal "$status" 1
+  assert_contains "$output" "stub conflict"
+  assert_contains "$output" "ssh"
+}
+
+@test "installing several different stubs puts the fake bin on PATH exactly once" {
+  install_claude_stub
+  install_fzf_stub
+  install_claude_profile_stub
+  local n; n="$(printf '%s' "$PATH" | tr ':' '\n' | grep -cxF "$BATS_TEST_TMPDIR/bin")"
+  assert_equal "$n" "1"
 }
