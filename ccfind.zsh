@@ -77,6 +77,47 @@ function _ccfind_strip_sgr() {
   print -rn -- "$out$s"
 }
 
+# ---- age -------------------------------------------------------------------
+# "when" and "how long ago" are different questions. The mtime answers the
+# first and is what you want once you know which session you mean; the age
+# answers the second and is what you want while scanning a list, where doing
+# date arithmetic in your head is the whole cost. Both come off the epoch the
+# record already carries, so showing them together costs nothing but columns.
+
+# _ccfind_now — the clock, as one seam. $CCFIND_NOW freezes it, which is what
+# lets the tests and the README-SVG generator produce the same bytes twice.
+function _ccfind_now() {
+  [[ -n "${CCFIND_NOW:-}" ]] && { print -rn -- "$CCFIND_NOW"; return 0 }
+  zmodload -F zsh/datetime p:EPOCHSECONDS 2>/dev/null
+  if [[ -n "${EPOCHSECONDS:-}" ]]; then print -rn -- "$EPOCHSECONDS"
+  else                                  print -rn -- "$(date +%s)"; fi
+}
+
+# _ccfind_rel <epoch> <now> — render an age: "just now", "42m ago", "5h ago".
+#
+# One unit, always, and truncated rather than rounded: this column is scanned,
+# not read, so "1h ago" beats "1h 12m ago" and a row must never claim to be
+# newer than it is. Months and years are the average-length kind — an age past
+# a month is being read as "ages ago", not as a date.
+#
+# A remote hit carries the *host's* epoch, so a host whose clock runs fast makes
+# the delta negative. No clamp is needed for that: the first bucket is `d < 60`,
+# which a negative delta satisfies, so a fast clock reads "just now" — which is
+# what it should say — rather than "-1m ago".
+function _ccfind_rel() {
+  local -i now="$2" d
+  [[ "$1" == <-> ]] || return 0        # no epoch (or not a number): no age
+  (( d = now - $1 ))
+  if   (( d <       60 )); then print -rn -- "just now"
+  elif (( d <     3600 )); then print -rn -- "$(( d / 60 ))m ago"
+  elif (( d <    86400 )); then print -rn -- "$(( d / 3600 ))h ago"
+  elif (( d <   604800 )); then print -rn -- "$(( d / 86400 ))d ago"
+  elif (( d <  2592000 )); then print -rn -- "$(( d / 604800 ))w ago"
+  elif (( d < 31536000 )); then print -rn -- "$(( d / 2592000 ))mo ago"
+  else                          print -rn -- "$(( d / 31536000 ))y ago"
+  fi
+}
+
 # _ccfind_claude_profiles — print "<label>\t<dir>" for every profile
 # claude-profile knows about, or nothing if it is not installed here.
 #
@@ -367,7 +408,7 @@ function ccfind() {
   # The fields a parsed row unpacks into, and the search scope — declared here
   # because the parser and the emitter below close over them and are defined
   # (and called) before the code that fills them in.
-  local _f _id _cwd _ts _snippet _host _profile _cfgdir _path _rest
+  local _f _id _cwd _ts _snippet _host _profile _cfgdir _path _epoch _rest
   local abs="" enc="" query=""
 
   while [[ "$1" == -* ]]; do
@@ -413,11 +454,11 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME=""
       source "$_envf"
       [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
       [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
@@ -425,13 +466,75 @@ function ccfind() {
       [[ -z "$_cfg_remote_resume" ]] && _cfg_remote_resume="$CCFIND_REMOTE_RESUME"
       [[ -z "$_cfg_remote_path" ]]   && _cfg_remote_path="$CCFIND_REMOTE_PATH"
       [[ -z "$_cfg_profile_path" ]]  && _cfg_profile_path="$CCFIND_PROFILE_PATH"
+      [[ -z "$_cfg_time" ]]          && _cfg_time="$CCFIND_TIME"
     fi
   fi
 
-  # Sequential field parser for a row (the record with its epoch stripped):
-  #   host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path
+  # ---- Time column. `both` (the default) prints the mtime and its age; `abs`
+  # is the mtime alone, as ccfind printed it before ages existed; `rel` is the
+  # age alone, for a narrow terminal where the snippet is worth more than the
+  # date. A typo falls back to `both` — but says so, because silently ignoring
+  # the setting looks identical to the feature not working.
+  local _time_mode="${_cfg_time:-both}"
+  if [[ "$_time_mode" != (abs|rel|both) ]]; then
+    print -u2 -r -- "${_CCF_WARN}ccfind: CCFIND_TIME=${_cfg_time} is not one of abs|rel|both — using both${_CCF_OFF}"
+    _time_mode=both
+  fi
+  # One clock reading for the whole run, so every age on screen is measured
+  # from the same instant and a long listing cannot straddle a minute boundary.
+  local _now=""
+  [[ "$_time_mode" == abs ]] || _now="$(_ccfind_now)"
+
+  # _ccfind_rel_token <epoch> — the row's age as it will be shown, plain: empty
+  # in abs mode, bare ("5h ago") when it stands alone, parenthesised when it
+  # trails a date. Plain because it gets padded to a column width first, and
+  # padding a coloured string counts SGR bytes that draw nothing.
+  local _rtok
+  _ccfind_rel_token() {
+    _rtok=""
+    [[ "$_time_mode" == abs || -z "$1" ]] && return 0
+    _rtok="$(_ccfind_rel "$1" "$_now")"
+    [[ -n "$_rtok" && "$_time_mode" == both ]] && _rtok="($_rtok)"
+  }
+
+  # _ccfind_time_cell <width> <abs-colour> — the finished, coloured time cell
+  # for the row currently parsed. Ages are right-aligned in <width> so the
+  # column after them stays put whatever units the rows happen to land in.
+  local _tcell
+  _ccfind_time_cell() {
+    _ccfind_rel_token "$_epoch"
+    case "$_time_mode" in
+      abs) _tcell="${2}${_ts}${_CCF_OFF}" ;;
+      rel) _tcell="${2}${(l:$1:)_rtok}${_CCF_OFF}" ;;
+      *)   _tcell="${2}${_ts}${_CCF_OFF}  ${_CCF_DIM}${(l:$1:)_rtok}${_CCF_OFF}" ;;
+    esac
+  }
+
+  # _ccfind_rel_width <rows...> — the widest age among the rows about to be
+  # shown, i.e. the natural column width, the same first-pass measure the
+  # picker already makes for its host and cwd columns.
+  integer w_rel=0
+  _ccfind_rel_width() {
+    w_rel=0
+    [[ "$_time_mode" == abs ]] && return 0
+    local _rw
+    for _rw in "$@"; do
+      _ccfind_parse_row "$_rw"; _ccfind_rel_token "$_epoch"
+      (( ${#_rtok} > w_rel )) && w_rel=${#_rtok}
+    done
+  }
+
+  # Sequential field parser for a row:
+  #   host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t epoch
   # Sequential rather than a split so an empty field — an unconfigured machine
   # has no profile label — stays an empty field instead of vanishing.
+  #
+  # The epoch rides at the END rather than the front (where the sortable record
+  # keeps it) so that fields 1-8 hold the positions the fzf bindings name. Rows
+  # reach here in three lengths: 8 fields from the emitter, which reads the
+  # epoch off the record itself; 9 as displayed; 10 back out of the picker, with
+  # the composed display field appended. Hence path is taken non-greedily and a
+  # missing 9th field leaves _epoch empty rather than a copy of the path.
   _ccfind_parse_row() {
     _rest="$1"
     [[ "$_rest" == *$'\033['* ]] && _rest="$(_ccfind_strip_sgr "$_rest")"
@@ -441,8 +544,10 @@ function ccfind() {
     _id="${_rest%%$'\t'*}";      _rest="${_rest#*$'\t'}"
     _cwd="${_rest%%$'\t'*}";     _rest="${_rest#*$'\t'}"
     _ts="${_rest%%$'\t'*}";      _rest="${_rest#*$'\t'}"
-    _snippet="${_rest%%$'\t'*}"
-    _path="${_rest#*$'\t'}"
+    _snippet="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _path="${_rest%%$'\t'*}"
+    if [[ "$_rest" == *$'\t'* ]]; then _epoch="${${_rest#*$'\t'}%%$'\t'*}"
+    else                               _epoch=""; fi
   }
 
   # A row's own machine: "local" is this one, anything else is an ssh alias.
@@ -942,15 +1047,17 @@ RSEOF
   local total=$(( local_count + remote_count ))
   local truncated=0
   (( total > max )) && truncated=1
-  # Rows for display/selection, epoch stripped:
-  # host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path
+  # Rows for display/selection — the sortable record with its leading epoch
+  # moved to the back, where it cannot shift the field numbers the fzf bindings
+  # and the tab-view patterns are written against:
+  # host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t epoch
   # rows_all keeps the full sorted list — it feeds the per-host tab views,
   # where a host shows its own newest hits even when none crack the global
   # top-max. rows is the capped slice everything else displays.
   local -a rows_all rows
   local _r
   for _r in "${merged[@]}"; do
-    rows_all+=("${_r#*$'\t'}")
+    rows_all+=("${_r#*$'\t'}"$'\t'"${_r%%$'\t'*}")
   done
   rows=("${rows_all[@]:0:$max}")
 
@@ -998,12 +1105,13 @@ RSEOF
     # fzf has no column model: with --with-nth it concatenates the chosen
     # fields and leaves them on the terminal's 8-column tab stops, so the cwd
     # and the snippet start somewhere different on every row. So compose ONE
-    # pre-padded, pre-coloured field and show only that (--with-nth=7).
-    # Alignment we control; the six data fields stay plain behind it, which is
+    # pre-padded, pre-coloured field and show only that (--with-nth).
+    # Alignment we control; the data fields stay plain behind it, which is
     # what lets the tab views filter on a bare "<label>\t" prefix and the
     # resume path parse fields it can trust. fzf strips the colour back off
     # whatever it hands us on the way out.
     integer w_host=0 w_cwd=0
+    _ccfind_rel_width "${rows[@]}"
     local _dcwd _dlabel
     local _showhost=0
     (( ${#remote_hosts} > 0 || ${#prof_labels} > 1 )) && _showhost=1
@@ -1022,7 +1130,7 @@ RSEOF
     done
     (( w_cwd > 44 )) && w_cwd=44          # a deep path must not push the snippet off-screen
 
-    local _crow _dts _dhost
+    local _crow _dhost
     _ccfind_disp_row() {   # <raw row> → the row plus a last field, its rendered line
       _ccfind_parse_row "$1"; _ccfind_row_label
       if _ccfind_is_local "$_host"; then _crow="$_CCF_PROF"; else _crow="$_CCF_HOST"; fi
@@ -1039,18 +1147,19 @@ RSEOF
         _lsn="${(L)_sn}"; _pre="${_lsn%%${(L)query}*}"
         (( ${#_pre} != ${#_lsn} && ${#_pre} > 14 )) && _sn="…${_sn[${#_pre}-11,-1]}"
       fi
-      _dts="${_CCF_DIM}${_ts}${_CCF_OFF}"
+      _ccfind_time_cell $w_rel "$_CCF_DIM"
       _dhost=""
       (( _showhost )) && _dhost="${_crow}${(r:$w_host:)_dlabel}${_CCF_OFF}  "
       # Pad on the plain text, colour after: an SGR run counts toward a string's
       # length but draws nothing, so padding a coloured field skews the column.
-      print -rn -- "$1"$'\t'"${_dts}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP")${_CCF_OFF}"
+      print -rn -- "$1"$'\t'"${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP")${_CCF_OFF}"
     }
 
-    # Field 9 is the composed display line (built below); 1-8 are the data
+    # Field 10 is the composed display line (built below); 1-9 are the data
     # fields, hidden — 1 (host) and 8 (path) feed the preview command, 3/4/5 the
-    # resume. Matching therefore runs over exactly what you can see.
-    local withnth='9' pvcache=''
+    # resume, 9 the epoch behind the age. Matching therefore runs over exactly
+    # what you can see.
+    local withnth='10' pvcache=''
     if (( ${#remote_hosts} > 0 )); then
       pvcache="$rtmpdir/pv"
       mkdir -p -- "$pvcache"
@@ -1159,6 +1268,7 @@ RSEOF
   # match lit inside the snippet. Every SGR here is empty when colour is off, so
   # a piped run emits exactly the bytes it always did.
   local resume shown=0 _tag
+  _ccfind_rel_width "${rows[@]}"
   for _r in "${rows[@]}"; do
     (( shown > 0 )) && printf '%s%s%s\n' "$_CCF_DIM" '──────────────────────────────────────────' "$_CCF_OFF"
     _ccfind_parse_row "$_r"
@@ -1186,7 +1296,8 @@ RSEOF
     fi
     # Display-only contraction, as in the picker; the resume line printed two
     # lines down still carries the path in full.
-    printf '%s%s%s  %s%s\n' "$_CCF_TS" "$_ts" "$_CCF_OFF" "$_tag" "${${_cwd:-?}/#$HOME/~}"
+    _ccfind_time_cell $w_rel "$_CCF_TS"
+    printf '%s  %s%s\n' "$_tcell" "$_tag" "${${_cwd:-?}/#$HOME/~}"
     [[ -n "$_snippet" ]] && \
       printf '   %s…%s…%s\n' "$_CCF_SNIP" "$(_ccfind_hl "$_snippet" "$query" "$_CCF_SNIP")" "$_CCF_OFF"
     printf '   %s%s%s\n' "$_CCF_CMD" "$resume" "$_CCF_OFF"

@@ -10,7 +10,7 @@ session is a `.jsonl` transcript under
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
 <div align="center">
-  <img src="assets/demo-90518b.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+  <img src="assets/demo-7783b6.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
 </div>
 
 ## Install
@@ -58,12 +58,12 @@ ccfind -j <text...>                # print the hits as JSON (--tsv for the raw r
 ### Interactive picker (default)
 
 When `fzf` is installed and both stdin and stdout are TTYs, `ccfind` shows an `fzf`
-picker of the hits — one aligned line per session: when it was last touched, which
-profile or host it belongs to, its working directory, and the matching text with the
-search term picked out.
+picker of the hits — one aligned line per session: when it was last touched
+and how long ago that was, which profile or host it belongs to, its working
+directory, and the matching text with the search term picked out.
 
 <div align="center">
-  <img src="assets/picker-90518b.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+  <img src="assets/picker-7783b6.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
 </div>
 
 | Key | Action |
@@ -82,12 +82,12 @@ before committing to one. On a remote hit the transcript is fetched over ssh on
 demand (once per session, then cached for as long as the picker is open):
 
 <div align="center">
-  <img src="assets/preview-90518b.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+  <img src="assets/preview-7783b6.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
 </div>
 
 ### Flat-list fallback
 
-Each hit prints the session's timestamp + working directory, a snippet centred on
+Each hit prints the session's timestamp and age + working directory, a snippet centred on
 the match, and the resume command (`cd <dir> && claude --resume <id>` when the
 session lived elsewhere, so it reloads in its original project context — correct
 `CLAUDE.md`, relative paths, git — else just `claude --resume <id>`). You get this
@@ -95,7 +95,7 @@ when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`
 `CCFIND_INTERACTIVE=0` is set.
 
 <div align="center">
-  <img src="assets/list-90518b.svg" alt="the ccfind flat list: each hit as a timestamp and profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+  <img src="assets/list-7783b6.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
 </div>
 
 ```zsh
@@ -146,7 +146,7 @@ The colours carry information rather than decoration:
 - the **search term** is picked out inside every snippet, in the list, in the picker
   and in the preview pane, so you can see *why* each session matched;
 - the **resume command** is green: the line you copy;
-- timestamps, separators and the surrounding snippet text are dimmed out of the way.
+- timestamps, ages, separators and the surrounding snippet text are dimmed out of the way.
 
 Colour switches itself off the moment stdout is not a terminal, so
 `ccfind foo | grep …`, `> file` and every script that parses the output see exactly
@@ -158,6 +158,40 @@ the same bytes they did before. To force the question:
 | `NO_COLOR=1` | plain, per <https://no-color.org> |
 | `CCFIND_COLOR=never` | plain |
 | `CCFIND_COLOR=always` | coloured even when piped (what the README images use) |
+
+## The time column
+
+Every hit leads with when the session was last touched, as a timestamp **and** as
+an age:
+
+```
+2026-08-20 14:32:05   (5h ago)  work:~/.zsh/ccfind
+2026-08-18 09:07:11   (2d ago)  ~/code/api
+2025-11-16 00:13:31  (9mo ago)  ~/code/older
+```
+
+The two answer different questions. The timestamp says *when* a session was, which
+is what you want once you know which one you mean — matching it against a calendar,
+a deploy, an incident. The age says *how long ago*, which is the question you are
+actually asking while scanning a list, and the one a date makes you do arithmetic
+for. Both come off the same mtime, so showing both costs columns and nothing else.
+
+Ages are a single truncated unit — `just now`, `42m ago`, `5h ago`, `3d ago`,
+`3w ago`, `9mo ago`, `2y ago` — never `1h 12m ago`. This column is scanned, not
+read, and truncation means a row never claims to be newer than it is. They are
+right-aligned to the widest age on screen, so the directory column stays put
+however the units land.
+
+Set `CCFIND_TIME` (env or `.env`) to change what the column holds:
+
+| | |
+|---|---|
+| `both` *(default)* | the timestamp and the age |
+| `abs` | the timestamp alone — what `ccfind` printed before ages existed |
+| `rel` | the age alone, ~12 columns narrower, for a terminal where the snippet is worth more than the date |
+
+`--json` and `--tsv` are unaffected: they carry the raw `epoch` and the `mtime`
+string, never a rendered age, which would be wrong the moment the document is read.
 
 ## Multi-profile search
 
@@ -384,7 +418,7 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 local-only runs, or when `CCFIND_TABS` is unset.
 
 <div align="center">
-  <img src="assets/tabs-90518b.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+  <img src="assets/tabs-7783b6.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
 </div>
 
 ## Notes
@@ -411,6 +445,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_PROFILE_PATH` | *(unset)* | Where `claude-profile.py` lives, if not one of the conventional paths. Only consulted when `CCFIND_PROFILES` is unset. |
 | `CCFIND_PROFILE_CMD` | *(unset)* | Command to ask for the profile list instead of `claude-profile` (called as `<cmd> list`, expecting `label<TAB>dir` lines). |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
+| `CCFIND_TIME` | `both` | Time column: `both` = mtime + age, `abs` = mtime only, `rel` = age only. |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |
 | `CCFIND_COLOR` | `auto` | `always` / `never` override the "colour only on a terminal" default. `NO_COLOR` and `-C` also force plain. |
