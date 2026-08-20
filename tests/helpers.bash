@@ -85,6 +85,19 @@ mk_session() {
   esac
 }
 
+# age_session <root> <cwd> <id> <seconds-ago> — backdate a fixture session's
+# mtime by <seconds-ago> relative to $CCFIND_NOW, the clock the test froze. An
+# assertion on "5h ago" is then about the formatter, not about when the suite
+# happened to run. `date -r` takes an epoch on BSD and a FILE on GNU, so the
+# GNU spelling is the fallback rather than a platform test.
+age_session() {
+  local root="$1" cwd="$2" id="$3" ago="$4"
+  local enc="${cwd//[^a-zA-Z0-9]/-}" e stamp
+  e=$(( ${CCFIND_NOW:?age_session needs CCFIND_NOW set and exported} - ago ))
+  stamp="$(date -r "$e" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$e" +%Y%m%d%H%M.%S)"
+  touch -t "$stamp" "$root/projects/$enc/$id.jsonl"
+}
+
 # run_ccfind <ccfind-args...> — run ccfind in an isolated zsh with the fixture
 # HOME. Exported CCFIND_* vars set by the test propagate into the subprocess.
 run_ccfind() {
