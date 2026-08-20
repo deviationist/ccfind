@@ -392,7 +392,7 @@ teardown() { ccfind_teardown; }
   run_ccfind -i deploy
   [ "$status" -eq 0 ]          # stub exits 130 = cancelled → nothing resumed
   [ -s "$FZF_ROWS" ]
-  assert_contains "$(cat "$FZF_ARGV")" "--with-nth=9"
+  assert_contains "$(cat "$FZF_ARGV")" "--with-nth=10"
 }
 
 @test "picker rows keep the data fields plain behind the display field" {
@@ -402,8 +402,8 @@ teardown() { ccfind_teardown; }
   run_ccfind -i deploy
   [ "$status" -eq 0 ]
   local row; row="$(head -1 "$FZF_ROWS")"
-  # 9 fields: host, profile, cfgdir, id, cwd, ts, snippet, path, display
-  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 9 ]
+  # 10 fields: host, profile, cfgdir, id, cwd, ts, snippet, path, epoch, display
+  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 10 ]
   # the data fields are what the resume and the preview read — no SGR in them,
   # or a host stops matching and a path stops opening.
   [ "$(cut -f1 <<<"$row")" = "local" ]
@@ -411,9 +411,11 @@ teardown() { ccfind_teardown; }
   [ "$(cut -f4 <<<"$row")" = "s1" ]
   [ "$(cut -f5 <<<"$row")" = "/proj/a" ]
   assert_contains "$(cut -f8 <<<"$row")" "/projects/-proj-a/s1.jsonl"
-  # …while field 9, the one fzf shows, carries the colour and the columns
-  assert_contains "$(cut -f9 <<<"$row")" $'\033['
-  assert_contains "$(cut -f9 <<<"$row")" "/proj/a"
+  # field 9 is the epoch the age is measured from — a bare number, not a date
+  assert_equal "$(cut -f9 <<<"$row" | grep -c '^[0-9][0-9]*$')" "1"
+  # …while field 10, the one fzf shows, carries the colour and the columns
+  assert_contains "$(cut -f10 <<<"$row")" $'\033['
+  assert_contains "$(cut -f10 <<<"$row")" "/proj/a"
 }
 
 @test "the picker gets one row per hit, newest first" {
@@ -947,6 +949,149 @@ STUB
   assert_contains "$output" "custom:/c/a"
 }
 
+# --- the time column: mtime, age, or both -----------------------------------
+# Every assertion here freezes the clock with CCFIND_NOW and backdates the
+# fixture against it, so what is under test is the rendering and never the
+# moment the suite ran.
+
+@test "a hit shows both its timestamp and its age" {
+  export CCFIND_NOW=1750000000
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000        # 5 hours
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "(5h ago)"
+  assert_contains "$output" ":"          # the clock time is still there too
+  run_ccfind --json deploy
+  assert_contains "$output" '"epoch": 1749982000'
+}
+
+@test "the age is a single truncated unit, all the way up the scale" {
+  export CCFIND_NOW=1750000000
+  local -a ids=(m1 h1 d1 w1 o1 y1)
+  local -a agos=(2740 18000 259200 1814400 15552000 63072000)
+  local -a want=("45m ago" "5h ago" "3d ago" "3w ago" "6mo ago" "2y ago")
+  local i
+  for (( i = 0; i < ${#ids[@]}; i++ )); do
+    mk_session  "$FIXHOME/.claude" "/proj/${ids[i]}" "${ids[i]}" "deploy"
+    age_session "$FIXHOME/.claude" "/proj/${ids[i]}" "${ids[i]}" "${agos[i]}"
+  done
+  run_ccfind -N -n 20 deploy
+  assert_equal "$status" 0
+  for (( i = 0; i < ${#want[@]}; i++ )); do
+    assert_contains "$output" "(${want[i]})"
+  done
+  # 45m40s prints as 45m: truncation, not rounding — a row must never read
+  # newer than it is. (Rounding would make this one 46m.)
+  refute_contains "$output" "(46m ago)"
+}
+
+@test "an age under a minute is words, not a zero" {
+  export CCFIND_NOW=1750000000
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 12
+  run_ccfind -N deploy
+  assert_contains "$output" "(just now)"
+  refute_contains "$output" "0m ago"
+}
+
+@test "a hit newer than the clock reads just now, not a negative age" {
+  # A remote hit carries the HOST's epoch. A host whose clock runs fast would
+  # otherwise produce "(-2m ago)", which reads as a bug in ccfind.
+  export CCFIND_NOW=1750000000
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 -120          # two minutes ahead
+  run_ccfind -N deploy
+  assert_contains "$output" "(just now)"
+  refute_contains "$output" "(-"
+}
+
+@test "the age column is right-aligned so the column after it stays put" {
+  export CCFIND_NOW=1750000000
+  mk_session "$FIXHOME/.claude" "/proj/aaa" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/aaa" s1 18000       # "(5h ago)"
+  mk_session "$FIXHOME/.claude" "/proj/bbb" s2 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/bbb" s2 15552000    # "(6mo ago)", wider
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  # Both location lines — the ones that open with the timestamp — put the cwd
+  # at the same column, however wide each row's own age turned out to be.
+  local cols; cols="$(awk '/^[0-9]/ { print index($0, "/proj/") }' <<<"$output")"
+  assert_equal "$(wc -l <<<"$cols" | tr -d ' ')" "2"
+  assert_equal "$(sort -u <<<"$cols" | wc -l | tr -d ' ')" "1"
+}
+
+@test "CCFIND_TIME=abs is the timestamp alone, as it was before ages" {
+  export CCFIND_NOW=1750000000 CCFIND_TIME=abs
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  refute_contains "$output" "ago"
+  assert_contains "$output" "/proj/a"
+}
+
+@test "CCFIND_TIME=rel gives the age the whole column" {
+  export CCFIND_NOW=1750000000 CCFIND_TIME=rel
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "5h ago"
+  refute_contains "$output" "(5h ago)"      # bare: nothing for it to trail
+  # and no clock time left over anywhere — matched by shape, not by value, so
+  # the assertion does not depend on the timezone the suite happens to run in
+  assert_equal "$(grep -c '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' <<<"$output")" "0"
+}
+
+@test "CCFIND_TIME can be set in the .env beside the script" {
+  export CCFIND_NOW=1750000000
+  printf 'typeset CCFIND_TIME="rel"\n' > "${CCFIND_ZSH%/*}/.env"
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "5h ago"
+  refute_contains "$output" "(5h ago)"
+}
+
+@test "an unknown CCFIND_TIME says so instead of being ignored" {
+  export CCFIND_NOW=1750000000 CCFIND_TIME=relative
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000
+  run_ccfind -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "not one of abs|rel|both"
+  assert_contains "$output" "(5h ago)"      # and the fallback really is both
+}
+
+@test "machine output carries the epoch, never a rendered age" {
+  # The age is a display concern; a consumer has the epoch and its own clock,
+  # and a "5h ago" baked into a document would be wrong the moment it is read.
+  export CCFIND_NOW=1750000000
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000
+  run_ccfind --tsv deploy
+  assert_equal "$status" 0
+  assert_equal "$(awk -F'\t' '{print NF}' <<<"$output")" 8
+  assert_equal "$(cut -f1 <<<"$output")" "1749982000"
+  refute_contains "$output" "ago"
+  run_ccfind --json deploy
+  refute_contains "$output" "ago"
+}
+
+@test "the picker's display column carries the age as well" {
+  install_fzf_stub
+  export CCFIND_NOW=1750000000
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  age_session "$FIXHOME/.claude" "/proj/a" s1 18000
+  run_ccfind -i deploy
+  assert_equal "$status" 0
+  local row; row="$(head -1 "$FZF_ROWS")"
+  assert_contains "$(cut -f10 <<<"$row")" "(5h ago)"
+  assert_equal    "$(cut -f9  <<<"$row")" "1749982000"
+}
+
 # --- what the picker's display column actually shows ------------------------
 
 @test "the display column contracts \$HOME but the resume keeps the full path" {
@@ -956,7 +1101,7 @@ STUB
   run_ccfind -i termx
   assert_equal "$status" 0
   local row; row="$(head -1 "$FZF_ROWS")"
-  assert_contains "$(cut -f9 <<<"$row")" "~/code/app"      # what you read
+  assert_contains "$(cut -f10 <<<"$row")" "~/code/app"     # what you read
   assert_equal    "$(cut -f5 <<<"$row")" "$FIXHOME/code/app"   # what it cds to
 }
 
@@ -969,7 +1114,7 @@ STUB
   export CCFIND_COLOR=always
   run_ccfind -i NEEDLE
   assert_equal "$status" 0
-  local disp; disp="$(cut -f9 < "$FZF_ROWS")"
+  local disp; disp="$(cut -f10 < "$FZF_ROWS")"
   assert_contains "$disp" "…"                     # the lead-in was cut
   # the match sits within ~14 characters of where the snippet column starts
   run python3 -c '

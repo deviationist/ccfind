@@ -106,6 +106,13 @@ Guards verified this way, each against the test named beside it:
 | pinning the local seat on a picker resume | Enter on a profile hit resumes into … |
 | the "cwd is gone" check before resuming | Enter refuses when the session's directory is gone |
 | tab wrap-around | tab_shift wraps around in both directions |
+| the epoch riding along on the display row | 4 of the time-column tests (the age goes blank without it) |
+| truncating the age instead of rounding it | the age is a single truncated unit … |
+| right-aligning the age column | the age column is right-aligned … |
+| the `abs` arm of the time cell | `CCFIND_TIME=abs` is the timestamp alone … |
+| the `rel` arm of the time cell | `CCFIND_TIME=rel` gives the age the whole column |
+| `CCFIND_TIME`'s `.env` fallback | `CCFIND_TIME` can be set in the `.env` beside the script |
+| the `abs\|rel\|both` validation | an unknown `CCFIND_TIME` says so instead of being ignored |
 
 ## The resume line as a contract
 

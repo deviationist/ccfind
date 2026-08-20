@@ -71,6 +71,14 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   never-onboarded `~/.claude/.claude.json` and opens the setup wizard. Remote hits
   carry the same test, resolved against the *host's* `$HOME` inside the ssh command.
   Unset → single `~/.claude` (unchanged).
+- **Time column:** every record carries the mtime as a string *and* the epoch it
+  came from, so the age is computed at display time, never stored. Default `both`
+  renders `2026-08-20 14:32:05  (5h ago)`; `CCFIND_TIME=abs` is the mtime alone
+  (the pre-age output) and `rel` the age alone. One unit, truncated, right-aligned
+  in the column's natural width so the column after it stays put; a negative delta
+  (a remote host's clock running fast) clamps to `just now`. `--json`/`--tsv` never
+  carry an age — a consumer has `epoch` and its own clock. `$CCFIND_NOW` freezes
+  the clock, which is how the tests and the SVG generator stay reproducible.
 - **Colour:** roles, not decoration — cyan = local profile label, magenta = remote
   host, bold yellow = the search term inside every snippet (list, picker and preview),
   green = the resume command, dim = timestamps/separators. Off whenever stdout is not
@@ -89,6 +97,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_HOSTS` | unset | ssh aliases for `-r`/`ccfindr` (env or `.env`) |
 | `CCFIND_REMOTE_RESUME` | unset | override remote resume: called `<cmd> <host> <cwd> <id>` (wrap in tmux/screen) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
+| `CCFIND_TIME` | both | time column: `both` (mtime + age) / `abs` (mtime) / `rel` (age) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
 | `CCFIND_INTERACTIVE` | 1 | `0` → default to flat list |
 | `CCFIND_COLOR` | auto | `always` / `never`; auto = colour only on a terminal |
@@ -101,9 +110,12 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   never leaks into the interactive shell.
 - Portable across macOS (BSD `stat`) and Linux (GNU `stat`); no bashisms.
 - Record schema (internal): `epoch \t host \t profile \t cfgdir \t id \t cwd \t ts \t
-  snippet \t path`; the picker appends a 10th composed display field and shows only
-  that (`--with-nth=9` on the row, epoch stripped). Colour lives in the display field
-  ONLY — the data fields must stay parseable.
+  snippet \t path`. For display the leading epoch moves to the BACK (field 9), so
+  fields 1-8 keep the positions the fzf bindings name (`{1}` host, `{8}` path); the
+  picker then appends a 10th composed display field and shows only that
+  (`--with-nth=10`). `_ccfind_parse_row` therefore takes path non-greedily and
+  tolerates 8-, 9- and 10-field rows. Colour lives in the display field ONLY — the
+  data fields must stay parseable.
 - Tests: `tests/run.sh` (bats; flat-list path, so no fzf/ssh/TTY needed). **Assert via
   `assert_contains`/`refute_contains`/`assert_equal`, never a bare `[[ … ]]`** — a
   false `[[ … ]]` mid-test does not fail a bats test (only a trailing one, or `[ … ]`). README
