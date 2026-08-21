@@ -40,6 +40,8 @@ ccfind -d <dir> <text...>          # only sessions whose cwd is <dir> or below i
 ccfind -d . <text...>              # scope to the current directory's subtree
 ccfind -x <text...>                # only sessions whose cwd is EXACTLY $PWD (no subdirs)
 ccfind -x -d <dir> <text...>       # same, for a directory other than $PWD
+ccfind -s <text...>                # case-SENSITIVE match (-I forces insensitive)
+ccfind -S <text...>                # smart-case: sensitive only if <text> has a capital
 ccfind -n <max> <text...>          # cap the number of hits shown (default 10)
 ccfind -N <text...>                # force the flat-list output (opt out of the picker)
 ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0 + the TTY check)
@@ -135,6 +137,56 @@ project directory after the session's cwd with every non-alphanumeric character
 flattened to `-`, so `~/code` and `~/code-scratch` both encode to
 `-Users-me-code…` and a subtree match can't tell a former `/` from a literal
 `-`. An exact name has no such ambiguity.
+
+## Case matching
+
+Matching folds case by default, which is what you want most of the time: you are
+usually trying to remember a conversation, not to grep a codebase. But a
+transcript is full of near-homographs — `Config` the type next to `config` the
+variable, `ERROR` the log level next to `error` the word — and once the query is
+one of those, folding is the thing standing between you and the session you meant.
+
+Three flags, and a setting for whichever you want by default:
+
+| | matches | |
+|---|---|---|
+| *(default)* | `foobar` finds `FooBar`, `FOOBAR`, `foobar` | what ccfind has always done |
+| `-s`, `--case-sensitive` | `FooBar` finds `FooBar` only | when the casing *is* the distinction |
+| `-I`, `--ignore-case` | folds, whatever the config says | the way back from a sensitive default |
+| `-S`, `--smart-case` | folds until the query has a capital | the rg/fzf/vim convention |
+
+```sh
+ccfind config              # every casing (default)
+ccfind -s Config           # the type, not the variable
+ccfind -S config           # no capital typed → folds
+ccfind -S Config           # a capital typed → sensitive
+```
+
+Smart-case is the one worth putting in the `.env`, because it reads intent off
+the query rather than off a flag you have to remember to pass:
+
+```sh
+# .env beside ccfind.zsh  (or export from ~/.zshrc)
+typeset CCFIND_CASE="smart"
+```
+
+`CCFIND_CASE` takes `insensitive` (the default), `sensitive`, or `smart`; the
+flags override it per call, so a `smart` default still leaves `-s` and `-I` for
+the times the query does not say what you meant.
+
+Two details worth knowing:
+
+- **"Has a capital" means an ASCII capital.** A query that expresses no case at
+  all — a session id, a path, a non-Latin script — reads as "no case was
+  intended", so smart-case folds it rather than guessing from its bytes.
+- **In a fan-out, smart is resolved once, on your machine, before any host is
+  dialled.** Every host is told sensitive-or-not, so they all answer the same
+  question. A host running a ccfind too old to know `-s` rejects the call and
+  falls back to its filesystem walk, which matches case itself — so it narrows
+  correctly rather than quietly handing back folded hits.
+
+The highlight follows the match: under `-s`, only the occurrences the search
+actually hit are coloured, in the list and in the preview alike.
 
 ## Colour
 
@@ -347,6 +399,8 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
 {
   "version": 1,
   "query": "connection refused",
+  "case_sensitive": false,
+  "case_mode": "insensitive",
   "scope": "",
   "scope_exact": false,
   "total": 6,
@@ -364,7 +418,10 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
 ```
 
 `scope` is the resolved `-d` directory (empty when unscoped) and `scope_exact` says
-whether `-x` restricted it to that directory alone. `host` is `local` or the ssh
+whether `-x` restricted it to that directory alone. `case_sensitive` is how these
+hits were actually matched and `case_mode` is the setting it came from — under
+`smart` the boolean is already resolved against the query, so a consumer never has
+to re-derive it. `host` is `local` or the ssh
 alias; `profile` is empty on a machine with no profiles
 configured; `config_dir` is the dir that hit belongs to, *on that machine*, which is
 what a consumer needs to resume it into the right seat. The document is well-formed
@@ -426,7 +483,8 @@ local-only runs, or when `CCFIND_TABS` is unset.
 - **Sort order:** newest first, by the transcript file's last-modified time
   (`ls -t`) — most recently active session first. Resuming a session appends to its
   file, so it pops back to the top.
-- Search is a **literal substring** (not regex), case-insensitive.
+- Search is a **literal substring** (not regex), case-insensitive by default — see
+  [Case matching](#case-matching) for `-s` / `-S` / `CCFIND_CASE`.
 - The encoded project-dir name is lossy (every `/` becomes `-`), so the displayed
   working directory is read from the `cwd` field *inside* each transcript (exact).
 - `CCFIND_MAX` caps how many results are printed / pickable (default 10; `-n <max>`
@@ -444,6 +502,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_REMOTE_PATH` | *(unset)* | Where ccfind lives on the remote hosts, if not one of the conventional paths. Enables remote multi-profile. |
 | `CCFIND_PROFILE_PATH` | *(unset)* | Where `claude-profile.py` lives, if not one of the conventional paths. Only consulted when `CCFIND_PROFILES` is unset. |
 | `CCFIND_PROFILE_CMD` | *(unset)* | Command to ask for the profile list instead of `claude-profile` (called as `<cmd> list`, expecting `label<TAB>dir` lines). |
+| `CCFIND_CASE` | `insensitive` | Default case matching: `insensitive`, `sensitive`, or `smart` (sensitive only when the query has a capital). `-s` / `-I` / `-S` override per call. |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_TIME` | `both` | Time column: `both` = mtime + age, `abs` = mtime only, `rel` = age only. |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |

@@ -13,6 +13,7 @@ Config auto-loads from a gitignored `.env` beside the script (see `.env.example`
 ccfind [text...]                   literal, case-insensitive; newest-first
   -d <dir>     scope to sessions whose cwd is <dir> or below
   -x           exact scope: that dir ONLY, no subdirs (dir defaults to $PWD)
+  -s | -I | -S case-sensitive / force-insensitive / smart-case (= CCFIND_CASE)
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
@@ -49,7 +50,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   matches the one name and is therefore unambiguous. Subtree hits are merged into
   the single newest-first list and share the `-n` budget, so sessions from the dir
   itself can be crowded out by busier sub-dirs — that is what `-x` is for.
-- **Machine output:** `--json` (envelope: version/query/scope/scope_exact/total/shown/truncated/
+- **Machine output:** `--json` (envelope: version/query/case_sensitive/case_mode/scope/scope_exact/total/shown/truncated/
   results[]) and `--tsv` (the wire record, host column dropped — the caller knows the
   alias it dialled). Both imply no picker and no colour, and stay well-formed with
   zero results: a sentence where a document belongs would be parsed as a record.
@@ -71,6 +72,18 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   never-onboarded `~/.claude/.claude.json` and opens the setup wizard. Remote hits
   carry the same test, resolved against the *host's* `$HOME` inside the ssh command.
   Unset → single `~/.claude` (unchanged).
+- **Case:** `CCFIND_CASE=insensitive|sensitive|smart` (env or `.env`, default
+  `insensitive`) sets it; `-s`/`-I`/`-S` override per call. `smart` = sensitive iff
+  the query holds an ASCII capital, and it is resolved ONCE on the caller, before
+  any host is dialled, so a fan-out asks every machine the same question. The
+  worker sends the resolved mode two ways: `CCFIND_CASE=<mode>` in the remote
+  ccfind's env (beats that host's `.env`, so its default cannot change the answer)
+  and, when sensitive, `-s` on the argv — which a pre-`-s` ccfind rejects, exiting
+  non-zero into the filesystem-walk fallback, which matches case itself. A
+  sensitive search therefore narrows or falls back, never silently folds.
+  `--json` carries the resolved boolean (`case_sensitive`) beside the mode it came
+  from (`case_mode`); `_ccfind_hl`'s 4th arg and `CCFIND_PV_CASE` keep the list and
+  preview highlights marking exactly what the grep matched.
 - **Time column:** every record carries the mtime as a string *and* the epoch it
   came from, so the age is computed at display time, never stored. Default `both`
   renders `2026-08-20 14:32:05  (5h ago)`; `CCFIND_TIME=abs` is the mtime alone
@@ -97,6 +110,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_HOSTS` | unset | ssh aliases for `-r`/`ccfindr` (env or `.env`) |
 | `CCFIND_REMOTE_RESUME` | unset | override remote resume: called `<cmd> <host> <cwd> <id>` (wrap in tmux/screen) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
+| `CCFIND_CASE` | insensitive | case matching: `insensitive` / `sensitive` / `smart` (`-s`/`-I`/`-S` override) |
 | `CCFIND_TIME` | both | time column: `both` (mtime + age) / `abs` (mtime) / `rel` (age) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
 | `CCFIND_INTERACTIVE` | 1 | `0` → default to flat list |

@@ -29,6 +29,16 @@ Coverage is the local search + profile logic (union, positional/`-p` scoping,
 profile-aware resume, `-d` scoping, caps, error paths). The remote (`-r`/ssh)
 fan-out is covered against a stubbed `ssh`.
 
+**Case matching** (`-s`/`-I`/`-S`, `CCFIND_CASE`) rests on one fixture: two
+sessions differing *only* in the casing of the search term (`mk_case_pair`). Every
+mode is then a statement about which of the two comes back, so a mode that
+silently does nothing reads as the wrong count rather than as a passing test. Both
+directions are asserted — a sensitive search must skip the other casing, and it
+must skip it whichever casing was typed — and the remote half is covered on all
+three paths a host can take: its own ccfind, a ccfind too old for `-s` (a stub
+that rejects the flag and would otherwise answer with both casings), and the
+worker's filesystem walk.
+
 **Colour** is covered as a display layer: off when stdout is not a terminal (which
 is what keeps every other assertion here working on plain bytes), on under
 `CCFIND_COLOR=always`, off again under `-C` or `NO_COLOR`, with the search term
@@ -113,6 +123,17 @@ Guards verified this way, each against the test named beside it:
 | the `rel` arm of the time cell | `CCFIND_TIME=rel` gives the age the whole column |
 | `CCFIND_TIME`'s `.env` fallback | `CCFIND_TIME` can be set in the `.env` beside the script |
 | the `abs\|rel\|both` validation | an unknown `CCFIND_TIME` says so instead of being ignored |
+| the case flag on the local grep | case: `-s` matches the query's own casing only |
+| resolving `smart` against the query | case: `-S` is smart — a capital in the query makes case matter |
+| `CCFIND_CASE`'s `.env` fallback | case: `CCFIND_CASE` can be set in the `.env` beside the script |
+| the case flag in the worker's own walk | case: the worker's own filesystem walk matches case too |
+| passing `-s` to the host's ccfind | case: `-s` narrows on a host whose ccfind is too old for the flag |
+| `CCFIND_CASE` in the remote ccfind's env | case: a host's own `CCFIND_CASE` does not override the caller's |
+| pulling the snippet window with the same fold | case: the snippet window is pulled to the occurrence that matched |
+| the highlighter's case argument | case: the highlight marks only what the search matched |
+| `CCFIND_PV_CASE` reaching the preview | case: the preview highlights only the casing … (+1 more) |
+| the resolved boolean in the envelope | case: `--json` reports the resolved boolean and the mode it came from |
+| naming case in the empty-result line | case: an empty result names case-sensitivity as a reason it might be |
 
 ## The resume line as a contract
 
