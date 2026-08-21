@@ -172,6 +172,323 @@ teardown() { ccfind_teardown; }
   assert_contains "$output" "3 total"
 }
 
+# --- case matching: -s / -I / -S and CCFIND_CASE ----------------------------
+# Two sessions differing ONLY in the casing of the search term is the whole
+# fixture: every mode below is a statement about which of the two comes back,
+# so a mode that silently does nothing shows up as the wrong count, not as a
+# passing test. mk_case_pair keeps that pair honest in one place.
+
+mk_case_pair() {   # <config-dir>
+  mk_session "$1" "/proj/upper" u1 "the FooBar widget"
+  mk_session "$1" "/proj/lower" l1 "the foobar widget"
+}
+
+@test "case: the default folds case, as it always has" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/upper"
+  assert_contains "$output" "/proj/lower"
+}
+
+@test "case: -s matches the query's own casing only" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/upper"
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: -s with a lowercase query skips the capitalised hit" {
+  # The mirror image of the test above. Without it, a -s that quietly matched
+  # everything-lowercase would still look right from the other direction.
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -s foobar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/lower"
+  refute_contains "$output" "/proj/upper"
+}
+
+@test "case: --case-sensitive is the long spelling of -s" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N --case-sensitive FooBar
+  assert_equal "$status" 0
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: -S is smart — a capital in the query makes case matter" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -S FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/upper"
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: -S on an all-lowercase query still folds" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -S foobar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/upper"
+  assert_contains "$output" "/proj/lower"
+}
+
+@test "case: smart reads only the query, never the transcript" {
+  # A capital in the HAYSTACK must not make the search sensitive — only a
+  # capital the user typed. Searching lowercase against a capitalised-only
+  # corpus is exactly where the two readings diverge.
+  mk_session "$FIXHOME/.claude" "/proj/upper" u1 "the FooBar widget"
+  run_ccfind -N -S foobar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/upper"
+}
+
+@test "case: a query with no ASCII letters is never smart-sensitive" {
+  # "Has a capital" is the ASCII test, so a query that expresses no case at all
+  # — an id, a path, a non-Latin script — has to land on folding rather than on
+  # whatever the locale would have said about its bytes.
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "id 12-34 Ünïcödé here"
+  run_ccfind -N -S "12-34"
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/a"
+}
+
+@test "case: CCFIND_CASE=sensitive sets the default for every call" {
+  export CCFIND_CASE=sensitive
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N FooBar
+  assert_equal "$status" 0
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: -I overrides a sensitive default back to folding" {
+  export CCFIND_CASE=sensitive
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -I FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/lower"
+}
+
+@test "case: -s overrides an insensitive default" {
+  export CCFIND_CASE=insensitive
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -s FooBar
+  assert_equal "$status" 0
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: CCFIND_CASE can be set in the .env beside the script" {
+  printf 'typeset CCFIND_CASE="smart"\n' > "${CCFIND_ZSH%/*}/.env"
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N FooBar
+  assert_equal "$status" 0
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: an exported CCFIND_CASE wins over the .env" {
+  printf 'typeset CCFIND_CASE="sensitive"\n' > "${CCFIND_ZSH%/*}/.env"
+  export CCFIND_CASE=insensitive
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/lower"
+}
+
+@test "case: an unknown CCFIND_CASE says so instead of being ignored" {
+  export CCFIND_CASE=yes
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "not one of sensitive|insensitive|smart"
+  assert_contains "$output" "/proj/lower"      # and the fallback really does fold
+}
+
+@test "case: the highlight marks only what the search matched" {
+  # One line carrying both casings: under -s exactly one of them is the hit, so
+  # a highlighter still folding case would light up all three occurrences.
+  export CCFIND_COLOR=always
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "first foobar then FooBar then foobar"
+  run_ccfind -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" $'\033[1;33mFooBar\033[0m'
+  refute_contains "$output" $'\033[1;33mfoobar\033[0m'
+}
+
+@test "case: the snippet window is pulled to the occurrence that matched" {
+  # The snippet is a 120-char window cut around the match, located by a second
+  # pass that has to agree with the grep about what "the match" is. On a line
+  # holding both casings far apart, a window still folding case would centre on
+  # the earlier lowercase one and show nothing of what -s actually hit.
+  local far
+  far="$(printf 'x%.0s' {1..300})"
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "lead foobar ${far} tail FooBar end"
+  run_ccfind -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "FooBar"
+  refute_contains "$output" "lead foobar"
+}
+
+@test "case: -I and -S have long spellings too" {
+  export CCFIND_CASE=sensitive
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N --ignore-case FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/lower"
+  run_ccfind -N --smart-case FooBar
+  assert_equal "$status" 0
+  refute_contains "$output" "/proj/lower"
+}
+
+@test "case: an empty result names case-sensitivity as a reason it might be" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "the foobar widget"
+  run_ccfind -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "No matching sessions."
+  assert_contains "$output" "case-sensitive"
+}
+
+@test "case: an insensitive empty result does not mention case at all" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "the foobar widget"
+  run_ccfind -N zzzznope
+  assert_equal "$status" 0
+  refute_contains "$output" "case-sensitive"
+}
+
+@test "case: --json reports the resolved boolean and the mode it came from" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind --json -S FooBar
+  assert_equal "$status" 0
+  run python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["case_sensitive"], d["case_mode"], d["total"])' <<<"$output"
+  assert_equal "$status" 0
+  assert_equal "$output" "True smart 1"
+}
+
+@test "case: --json says false for the default fold" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind --json FooBar
+  assert_equal "$status" 0
+  run python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["case_sensitive"], d["case_mode"], d["total"])' <<<"$output"
+  assert_equal "$status" 0
+  assert_equal "$output" "False insensitive 2"
+}
+
+@test "case: -v names the resolved sensitivity and the mode behind it" {
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -N -v -S FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "case: sensitive (mode: smart)"
+}
+
+@test "case: -s scopes the remote search too" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/upper" U1 "the FooBar widget"
+  mk_session "$REMOTE_HOME/.claude" "/srv/lower" L1 "the foobar widget"
+  run_ccfind -H nas -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/upper"
+  refute_contains "$output" "/srv/lower"
+}
+
+@test "case: smart resolves once, on the caller, before any host is dialled" {
+  # The host is told sensitive-or-not, never "smart" — otherwise a fan-out
+  # would depend on each host agreeing about what the query looks like.
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/upper" U1 "the FooBar widget"
+  mk_session "$REMOTE_HOME/.claude" "/srv/lower" L1 "the foobar widget"
+  run_ccfind -H nas -N -S FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/upper"
+  refute_contains "$output" "/srv/lower"
+  assert_contains "$(cat "$SSH_LOG")" " -s "
+}
+
+@test "case: the worker's own filesystem walk matches case too" {
+  # A host with no ccfind at all is searched by the walk inside the worker
+  # script, which has its own grep and so its own chance to ignore the flag.
+  install_ssh_stub_bare_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/upper" U1 "the FooBar widget"
+  mk_session "$REMOTE_HOME/.claude" "/srv/lower" L1 "the foobar widget"
+  run_ccfind -H nas -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/upper"
+  refute_contains "$output" "/srv/lower"
+}
+
+@test "case: -s narrows on a host whose ccfind is too old for the flag" {
+  # Version skew, from the one direction that can give a WRONG answer rather
+  # than a thin one: a ccfind new enough for --tsv but predating -s would fold
+  # the query and hand back hits the caller did not ask for. Passing -s is what
+  # makes it reject the call instead, dropping the host to the worker's own
+  # walk — which matches case itself. So the host narrows, or it falls back;
+  # what it must never do is answer the wrong question successfully.
+  install_ssh_stub_real_host
+  cat > "$REMOTE_CCFIND_DIR/ccfind.zsh" <<'OLD'
+# a ccfind that knows --tsv but not -s, and therefore always folds case
+function ccfind() {
+  local a
+  for a in "$@"; do
+    [[ "$a" == -s ]] && { print -u2 "ccfind: unknown option -s"; return 2 }
+  done
+  local d="$HOME/.claude"
+  printf '1700000000\t\t%s\tU1\t/srv/upper\t2024-01-01 12:00:00\tthe FooBar widget\t%s\n' \
+    "$d" "$d/projects/-srv-upper/U1.jsonl"
+  printf '1700000000\t\t%s\tL1\t/srv/lower\t2024-01-01 12:00:00\tthe foobar widget\t%s\n' \
+    "$d" "$d/projects/-srv-lower/L1.jsonl"
+}
+OLD
+  mk_session "$REMOTE_HOME/.claude" "/srv/upper" U1 "the FooBar widget"
+  mk_session "$REMOTE_HOME/.claude" "/srv/lower" L1 "the foobar widget"
+  run_ccfind -H nas -N -s FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/upper"
+  refute_contains "$output" "/srv/lower"
+}
+
+@test "case: a host's own CCFIND_CASE does not override the caller's" {
+  # The rest of the host's config is exactly what a remote search wants — its
+  # profiles are the reason to ask it at all — but the QUESTION is the caller's.
+  # A host defaulting to sensitive must not answer a folded search sensitively.
+  install_ssh_stub_real_host
+  printf 'typeset CCFIND_CASE="sensitive"\n' >> "$REMOTE_CCFIND_DIR/.env"
+  mk_session "$REMOTE_HOME/.claude" "/srv/upper" U1 "the FooBar widget"
+  mk_session "$REMOTE_HOME/.claude" "/srv/lower" L1 "the foobar widget"
+  run_ccfind -H nas -N FooBar
+  assert_equal "$status" 0
+  assert_contains "$output" "/srv/upper"
+  assert_contains "$output" "/srv/lower"
+}
+
+@test "case: the preview highlights only the casing the search matched" {
+  export CCFIND_COLOR=always
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "x"
+  local enc="-proj-a"
+  cat > "$FIXHOME/.claude/projects/$enc/s1.jsonl" <<'JSONL'
+{"cwd":"/proj/a","type":"user","message":{"role":"user","content":"first foobar then FooBar"}}
+JSONL
+  run env HOME="$FIXHOME" CCFIND_PV_QUERY=FooBar CCFIND_PV_CASE=1 \
+    zsh -fc 'source "$1"; _ccfind_preview local "$2"' _ "$CCFIND_ZSH" \
+    "$FIXHOME/.claude/projects/$enc/s1.jsonl"
+  assert_equal "$status" 0
+  assert_contains "$output" $'\033[1;33mFooBar\033[0m'
+  refute_contains "$output" $'\033[1;33mfoobar\033[0m'
+}
+
+@test "case: the picker tells the preview which casing to mark" {
+  install_fzf_stub
+  mk_case_pair "$FIXHOME/.claude"
+  run_ccfind -i -s FooBar
+  assert_contains "$(cat "$FZF_ARGV")" "CCFIND_PV_CASE=1"
+}
+
+@test "_ccfind_hl folds case by default and stops folding on request" {
+  run env CCFIND_COLOR=always zsh -fc 'source "$1"
+                   _CCF_HIT=$'"'"'\033[1;33m'"'"'; _CCF_OFF=$'"'"'\033[0m'"'"'
+                   _ccfind_hl "aB ab" "ab" "" ; print
+                   _ccfind_hl "aB ab" "ab" "" 1' _ "$CCFIND_ZSH"
+  assert_equal "$status" 0
+  assert_equal "${lines[0]}" $'\033[1;33maB\033[0m \033[1;33mab\033[0m'
+  assert_equal "${lines[1]}" $'aB \033[1;33mab\033[0m'
+}
+
 @test "remote (stubbed ssh): host column + default ssh resume command" {
   install_ssh_stub
   run_ccfind -H fakehost -N anything

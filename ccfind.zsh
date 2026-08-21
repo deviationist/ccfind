@@ -36,25 +36,30 @@ function _ccfind_colors() {
   fi
 }
 
-# _ccfind_hl <text> <query> <ctx> — wrap every case-insensitive occurrence of
+# _ccfind_hl <text> <query> <ctx> [<case-sensitive>] — wrap every occurrence of
 # <query> in <text> with the hit colour, restoring <ctx> (the colour the run
-# sits inside) after each one, and print the result.
+# sits inside) after each one, and print the result. Matching folds case unless
+# arg 4 is 1, so the highlight marks exactly what the grep matched on.
 #
 # Literal, not regex — the search itself is literal, and a query may well hold
-# glob metacharacters. `${lower%%$q*}` is the trick: a parameter expanded into
+# glob metacharacters. `${hay%%$q*}` is the trick: a parameter expanded into
 # a pattern position is NOT itself re-read as a pattern in zsh, so $q matches
 # verbatim while the `*` written here stays a wildcard; `%%` takes the longest
 # suffix, leaving the shortest prefix = the first occurrence.
 function _ccfind_hl() {
-  local s="$1" q="$2" ctx="$3" out="" pre rest lower lq
+  local s="$1" q="$2" ctx="$3" cs="${4:-0}" out="" pre rest hay lq
   if [[ -z "$s" || -z "$q" || -z "$_CCF_HIT" ]]; then print -rn -- "$s"; return; fi
-  lq="${(L)q}"; rest="$s"
+  (( cs )) && lq="$q" || lq="${(L)q}"
+  rest="$s"
   while [[ -n "$rest" ]]; do
-    lower="${(L)rest}"
-    (( ${#lower} == ${#rest} )) || break   # a case fold that changed the length
-                                           # (non-ASCII) breaks the 1:1 index map
-    pre="${lower%%$lq*}"
-    (( ${#pre} == ${#lower} )) && break     # no further occurrence
+    if (( cs )); then
+      hay="$rest"
+    else
+      hay="${(L)rest}"
+      (( ${#hay} == ${#rest} )) || break    # a case fold that changed the length
+    fi                                      # (non-ASCII) breaks the 1:1 index map
+    pre="${hay%%$lq*}"
+    (( ${#pre} == ${#hay} )) && break        # no further occurrence
     out+="${rest[1,${#pre}]}${_CCF_HIT}${rest[${#pre}+1,${#pre}+${#lq}]}${_CCF_OFF}${ctx}"
     rest="${rest[${#pre}+${#lq}+1,-1]}"
   done
@@ -233,21 +238,28 @@ USERC, ASSTC = sgr("1;36"), sgr("1;35")   # cyan / magenta role labels
 HIT = sgr("1;33")                          # the search term, as in the list
 
 # The query ccfind matched on, so the preview can show *where* it hit rather
-# than leaving you to spot it. Empty for a no-query listing.
+# than leaving you to spot it. Empty for a no-query listing. CCFIND_PV_CASE is
+# the resolved case mode of the run that produced the hit ("1" = case-sensitive),
+# so the preview marks exactly what the grep matched and not a near-miss.
 QUERY = os.environ.get("CCFIND_PV_QUERY", "")
+CASE = os.environ.get("CCFIND_PV_CASE", "") == "1"
 
 
 def hl(text, ctx=""):
-    """Wrap case-insensitive occurrences of QUERY in the hit colour, restoring
-    `ctx` after each — the literal-substring twin of the shell's _ccfind_hl."""
+    """Wrap occurrences of QUERY in the hit colour, restoring `ctx` after each —
+    the literal-substring twin of the shell's _ccfind_hl. Folds case unless the
+    run was case-sensitive."""
     if not QUERY or not HIT:
         return text
-    low, lq = text.lower(), QUERY.lower()
-    if len(low) != len(text) or len(lq) != len(QUERY):
-        return text            # a case fold changed the length: indices no longer map
+    if CASE:
+        hay, lq = text, QUERY
+    else:
+        hay, lq = text.lower(), QUERY.lower()
+        if len(hay) != len(text) or len(lq) != len(QUERY):
+            return text        # a case fold changed the length: indices no longer map
     out, i = [], 0
     while True:
-        j = low.find(lq, i)
+        j = hay.find(lq, i)
         if j < 0:
             break
         out.append(text[i:j])
@@ -361,6 +373,8 @@ function _ccfind_tab_shift() {
 #   ccfind -d . <text...>       scope to the current directory's subtree
 #   ccfind -x <text...>         only sessions whose cwd is EXACTLY $PWD —
 #                               no subdirectories (`-x -d <dir>` for another dir)
+#   ccfind -s <text...>         match case-sensitively; -I forces insensitive
+#   ccfind -S <text...>         smart-case: sensitive only if <text> has a capital
 #   ccfind [-d <dir>]           no query → list the most recent sessions
 #   ccfind -N <text...>         force the flat-list output (skip the picker)
 #   ccfind -r <text...>         also search the configured remote hosts
@@ -371,6 +385,13 @@ function _ccfind_tab_shift() {
 #   ccfind <profile> <text...>  scope the LOCAL search to one CCFIND_PROFILES
 #   ccfind -p <profile> <text>  profile (e.g. `ccfind work foo`); omit it to
 #                               search every configured profile at once
+#
+# Case matching (CCFIND_CASE, env or the .env beside this file) picks the
+# default the flags then override per call: `insensitive` (the default, and what
+# ccfind has always done), `sensitive`, or `smart` — insensitive until the query
+# itself carries a capital, the convention rg/fzf/vim share. Smart is resolved
+# once, against the query, BEFORE any host is dialled, so every machine in a
+# fan-out matches identically instead of each re-reading the query for itself.
 #
 # Multi-host search (opt-in per call): set CCFIND_HOSTS to a space/comma-
 # separated list of ssh aliases (exported, or in the .env beside this file), then pass
@@ -400,7 +421,7 @@ function ccfind() {
   local scope="" exact=0
   local interactive="${CCFIND_INTERACTIVE:-1}" interactive_forced=0
   local hosts_override="" local_only=0 remote=0 prof_filter="" color_override=""
-  local emit="" verbose=0
+  local emit="" verbose=0 case_override=""
   # Every colour slot _ccfind_colors fills. Declared local here (it assigns into
   # its caller's scope) so no SGR variable ever leaks into the interactive shell.
   local _CCF_OFF _CCF_DIM _CCF_TS _CCF_PROF _CCF_HOST _CCF_SNIP _CCF_HIT \
@@ -422,14 +443,20 @@ function ccfind() {
       -l|--local) local_only=1; shift ;;
       -H|--hosts) hosts_override="$2"; shift 2 ;;
       -p|--profile) prof_filter="$2"; shift 2 ;;
+      -s|--case-sensitive) case_override=sensitive; shift ;;
+      -I|--ignore-case) case_override=insensitive; shift ;;
+      -S|--smart-case) case_override=smart; shift ;;
       -C|--no-color|--no-colour) color_override=never; shift ;;
       -j|--json) emit=json; shift ;;
       --tsv) emit=tsv; shift ;;
       -v|--verbose) verbose=1; shift ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-r|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
+        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-r|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
         echo "  -d <dir> scopes to that dir AND everything below it; -x/--exact narrows to"
         echo "  that one dir only (no subdirectories), and defaults the dir to \$PWD"
+        echo "  matching is case-insensitive by default: -s/--case-sensitive forces case to"
+        echo "  matter, -I/--ignore-case forces it not to, -S/--smart-case makes it matter"
+        echo "  only when the query itself has a capital (CCFIND_CASE sets the default)"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  multi-profile (CCFIND_PROFILES): -p <label>, or a leading <label> arg, scopes to one profile"
@@ -454,11 +481,11 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE=""
       source "$_envf"
       [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
       [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
@@ -467,7 +494,20 @@ function ccfind() {
       [[ -z "$_cfg_remote_path" ]]   && _cfg_remote_path="$CCFIND_REMOTE_PATH"
       [[ -z "$_cfg_profile_path" ]]  && _cfg_profile_path="$CCFIND_PROFILE_PATH"
       [[ -z "$_cfg_time" ]]          && _cfg_time="$CCFIND_TIME"
+      [[ -z "$_cfg_case" ]]          && _cfg_case="$CCFIND_CASE"
     fi
+  fi
+
+  # ---- Case matching. The flags are the loudest voice, then CCFIND_CASE, then
+  # the historical default: fold case. `smart` cannot be resolved yet — it reads
+  # the query, which the option loop has not reached — so this settles the MODE
+  # here and the boolean further down, once $query exists. A typo falls back to
+  # the default but says so: silently ignoring the setting looks identical to
+  # the feature not working.
+  local _case_mode="${case_override:-${_cfg_case:-insensitive}}"
+  if [[ "$_case_mode" != (sensitive|insensitive|smart) ]]; then
+    print -u2 -r -- "${_CCF_WARN}ccfind: CCFIND_CASE=${_cfg_case} is not one of sensitive|insensitive|smart — using insensitive${_CCF_OFF}"
+    _case_mode=insensitive
   fi
 
   # ---- Time column. `both` (the default) prints the mtime and its age; `abs`
@@ -596,6 +636,12 @@ function ccfind() {
     print -r -- '{'
     print -r -- '  "version": 1,'
     print -rn -- '  "query": '; _ccfind_json_str "$query"; print -r -- ','
+    # The RESOLVED boolean, not the mode: a consumer wants to know how the hits
+    # in front of it were matched, and "smart" would leave it re-deriving that
+    # from the query. The mode rides along beside it for the same reason a log
+    # line does — to explain where the boolean came from.
+    print -r -- "  \"case_sensitive\": $( (( csens )) && print -n true || print -n false ),"
+    print -rn -- '  "case_mode": '; _ccfind_json_str "$_case_mode"; print -r -- ','
     print -rn -- '  "scope": ';  _ccfind_json_str "$abs";   print -r -- ','
     print -r -- "  \"scope_exact\": $( (( exact )) && print -n true || print -n false ),"
     print -r -- "  \"total\": ${total:-0},"
@@ -684,6 +730,30 @@ function ccfind() {
   fi
   query="${_pos[*]}"
 
+  # ---- Case, resolved. Now that the query is known, `smart` can collapse into
+  # the boolean everything downstream actually uses: grep's -i, the snippet
+  # window, the highlighter, the preview, and the flag the remote workers get.
+  # Resolving it HERE — once, on the caller — is what keeps a fan-out coherent:
+  # every host is told sensitive-or-not rather than re-deciding from a query
+  # whose capitals it would read the same way but need not.
+  #
+  # "Has a capital" is the ASCII test, deliberately: it is the one the fixed
+  # A-Z range can answer without a locale, and a query with no ASCII letters at
+  # all (a path, an id, a non-Latin script) reads as "no case was expressed",
+  # which is exactly when folding is the safe answer.
+  local -i csens=0
+  case "$_case_mode" in
+    sensitive)   csens=1 ;;
+    smart)       [[ "$query" == *[A-Z]* ]] && csens=1 ;;
+  esac
+  # grep's case flag as an array, so "no flag" is genuinely no argument rather
+  # than an empty string grep would take for the pattern.
+  local -a _gcase=(-i)
+  (( csens )) && _gcase=()
+  if (( verbose )) && [[ -n "$query" ]]; then
+    print -u2 -r -- "${_CCF_DIM}ccfind: case: $( (( csens )) && print -n sensitive || print -n insensitive ) (mode: $_case_mode)${_CCF_OFF}"
+  fi
+
   # A profile filter (from -p or the positional) narrows the local set to one.
   if [[ -n "$prof_filter" ]]; then
     if [[ -z "${prof_cfgdir[$prof_filter]+x}" ]]; then
@@ -748,7 +818,9 @@ function ccfind() {
     _rscript="$(cat <<'RSEOF'
 # ccfind remote worker — runs on each CCFIND_HOSTS host via `ssh <host> sh -s`.
 # args: $1=query (may be empty)  $2=max  $3=encoded cwd-scope prefix (may be
-#       empty)  $4=the -d path as typed (may be empty)
+#       empty)  $4=the -d path as typed (may be empty)  $5=1 for -x
+#       $6=1 for a case-sensitive match, 0 to fold (already resolved by the
+#       caller, so `smart` is decided once for the whole fan-out)
 #
 # Emits one header line, then records:
 #   #ccfind mode=<remote|fallback> [reason=<why>]
@@ -773,8 +845,11 @@ function ccfind() {
 # `zsh -f` skips the rc entirely (fast, and no surprises from someone's
 # prompt), and sourcing the file still auto-loads the .env beside it — which
 # is where that host's CCFIND_PROFILES lives.
-q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"
+q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"; csens="$6"
 root="$HOME/.claude/projects"
+# grep's fold flag, as a word that is empty when unwanted — this is POSIX sh,
+# so there are no arrays; the unquoted expansions below are deliberate.
+if [ "$csens" = 1 ]; then gi=""; cmode=sensitive; else gi="-i"; cmode=insensitive; fi
 
 # The host's own config is the whole point of asking it, so make sure it is the
 # ONLY config in play: drop any CCFIND_* the caller's environment managed to
@@ -782,7 +857,8 @@ root="$HOME/.claude/projects"
 # (SendEnv, or a stand-in during testing) would otherwise have this host
 # searching the CALLER's profile directories under its own name.
 unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
-      CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD
+      CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD \
+      CCFIND_CASE
 
 # Try EVERY candidate, not just the first one that exists. A host can easily
 # carry more than one clone — one left where the tool used to live, one where it
@@ -811,7 +887,17 @@ if command -v zsh >/dev/null 2>&1; then
     # honours exact itself. So an old host narrows correctly instead of
     # quietly widening to the whole subtree.
     [ "$exact" = 1 ] && set -- "$@" -x
-    out=$(zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
+    # Case travels two ways on purpose. CCFIND_CASE in the environment beats the
+    # host's own .env, so a host that has set a default cannot quietly answer a
+    # different question than the one asked — and a ccfind too old to know the
+    # variable simply ignores it, which is already the insensitive default.
+    # The -s flag is what makes a SENSITIVE search safe on such a host: it is
+    # rejected, the candidate exits non-zero, and we drop to the filesystem walk
+    # below — which honours $csens itself. Without it an old host would silently
+    # return insensitive hits under a sensitive search, which is the one failure
+    # mode worth a fallback.
+    [ "$csens" = 1 ] && set -- "$@" -s
+    out=$(CCFIND_CASE="$cmode" zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
     # Exit status alone decides, NOT whether anything came back: a search that
     # legitimately matched nothing is a successful remote search, and testing
     # for output would demote it to a fallback — a pointless second walk of the
@@ -848,7 +934,7 @@ else
 fi
 [ -n "$files" ] || exit 0
 if [ -n "$q" ]; then
-  files=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 grep -liF -- "$q" 2>/dev/null)
+  files=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 grep -lF $gi -- "$q" 2>/dev/null)
   [ -n "$files" ] || exit 0
 fi
 tab=$(printf '\t')
@@ -860,9 +946,10 @@ done | sort -t "$tab" -k1,1rn | head -n "$max" | while IFS="$tab" read -r e f; d
   [ -n "$cwd" ] || cwd="?"
   snippet=""
   if [ -n "$q" ]; then
-    lq=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
-    snippet=$(grep -im1 -F -- "$q" "$f" 2>/dev/null | tr -d '\000-\037' \
-      | awk -v q="$lq" '{l=tolower($0); p=index(l,q); if(p>0){s=p-45; if(s<1)s=1; print substr($0,s,120)}}')
+    if [ "$csens" = 1 ]; then lq="$q"; else
+      lq=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]'); fi
+    snippet=$(grep $gi -m1 -F -- "$q" "$f" 2>/dev/null | tr -d '\000-\037' \
+      | awk -v q="$lq" -v cs="$csens" '{l=(cs=="1"?$0:tolower($0)); p=index(l,q); if(p>0){s=p-45; if(s<1)s=1; print substr($0,s,120)}}')
   fi
   # profile and cfgdir: nameless, and the one dir this path knows about.
   printf '%s\t\t%s\t%s\t%s\t%s\t%s\t%s\n' "$e" "$HOME/.claude" "$id" "$cwd" "$(mt "$f")" "$snippet" "$f"
@@ -877,7 +964,7 @@ RSEOF
     for h in "${remote_hosts[@]}"; do
       (
         command ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$h" \
-          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact}" \
+          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact} ${(q)csens}" \
           <<<"$_rscript" >"$rtmpdir/${h//\//_}.tsv" 2>/dev/null
         echo $? >"$rtmpdir/${h//\//_}.rc"
       ) &
@@ -902,8 +989,12 @@ RSEOF
     _cwd="$(grep -m1 -o '"cwd":"[^"]*"' "$_f" 2>/dev/null | head -1 | sed 's/.*"cwd":"//;s/"$//')"
     _ts="$(_statfn "$_f")"
     if [[ -n "$query" ]]; then
-      _snippet="$(grep -im1 -F -- "$query" "$_f" 2>/dev/null | tr -d '\000-\037' \
-        | awk -v q="${(L)query}" '{l=tolower($0); p=index(l,q); if(p>0){s=p-45; if(s<1)s=1; print substr($0,s,120)}}')"
+      # The awk pass pulls the 120-char window to the match instead of taking
+      # the head of the line, so it has to locate the match the same way grep
+      # just did — folding both sides, or neither.
+      _snippet="$(grep $_gcase -m1 -F -- "$query" "$_f" 2>/dev/null | tr -d '\000-\037' \
+        | awk -v q="$( (( csens )) && print -rn -- "$query" || print -rn -- "${(L)query}" )" -v cs="$csens" \
+              '{l=(cs?$0:tolower($0)); p=index(l,q); if(p>0){s=p-45; if(s<1)s=1; print substr($0,s,120)}}')"
     else
       _snippet=""
     fi
@@ -949,7 +1040,7 @@ RSEOF
     pjsonls=($^projdirs/*.jsonl(N))
     (( ${#pjsonls} == 0 )) && continue
     if [[ -n "$query" ]]; then
-      phits=("${(@f)$(grep -liF -- "$query" "${pjsonls[@]}" 2>/dev/null)}")
+      phits=("${(@f)$(grep -lF $_gcase -- "$query" "${pjsonls[@]}" 2>/dev/null)}")
     else
       phits=("${pjsonls[@]}")
     fi
@@ -1034,6 +1125,9 @@ RSEOF
     # covered so the next attempt is an informed one.
     local -a _what
     [[ -n "$query" ]] && _what+=("query \"$query\"")
+    # Only when it is ON: an insensitive search is the default, and naming it
+    # here would pad every empty result with a line that rules nothing out.
+    (( csens )) && _what+=("case-sensitive")
     (( profiles_on )) && _what+=("profiles: ${(j:, :)prof_labels}")
     (( ${#remote_hosts} > 0 )) && _what+=("hosts: ${(j:, :)remote_hosts}")
     [[ -n "$abs" ]] && { (( exact )) && _what+=("in $abs only") || _what+=("under $abs") }
@@ -1152,7 +1246,7 @@ RSEOF
       (( _showhost )) && _dhost="${_crow}${(r:$w_host:)_dlabel}${_CCF_OFF}  "
       # Pad on the plain text, colour after: an SGR run counts toward a string's
       # length but draws nothing, so padding a coloured field skews the column.
-      print -rn -- "$1"$'\t'"${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP")${_CCF_OFF}"
+      print -rn -- "$1"$'\t'"${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP" "$csens")${_CCF_OFF}"
     }
 
     # Field 10 is the composed display line (built below); 1-9 are the data
@@ -1226,7 +1320,7 @@ RSEOF
             --delimiter=$'\t' --with-nth=$withnth \
             --no-sort --ansi --reverse --height=80% \
             --header="$header" \
-            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}} CCFIND_PV_QUERY=${(q)query}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {8}'" \
+            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}} CCFIND_PV_QUERY=${(q)query} CCFIND_PV_CASE=${(q)csens}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {8}'" \
             --preview-window='hidden,right,60%,wrap' \
             --bind 'right:show-preview' \
             --bind 'left:hide-preview' \
@@ -1299,7 +1393,7 @@ RSEOF
     _ccfind_time_cell $w_rel "$_CCF_TS"
     printf '%s  %s%s\n' "$_tcell" "$_tag" "${${_cwd:-?}/#$HOME/~}"
     [[ -n "$_snippet" ]] && \
-      printf '   %s…%s…%s\n' "$_CCF_SNIP" "$(_ccfind_hl "$_snippet" "$query" "$_CCF_SNIP")" "$_CCF_OFF"
+      printf '   %s…%s…%s\n' "$_CCF_SNIP" "$(_ccfind_hl "$_snippet" "$query" "$_CCF_SNIP" "$csens")" "$_CCF_OFF"
     printf '   %s%s%s\n' "$_CCF_CMD" "$resume" "$_CCF_OFF"
     (( shown++ ))
   done
