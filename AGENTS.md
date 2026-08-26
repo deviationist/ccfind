@@ -21,6 +21,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -j | --tsv   machine output: JSON document / raw tab-separated records
   -r           also search CCFIND_HOSTS over ssh   (alias: ccfindr = ccfind -r)
   -H "<hosts>" search an explicit ssh-alias list (implies remote)
+  -R           search the hosts INSTEAD of local (-R -H quim = that host alone)
   -l           force local only (trumps -r / -H)
   -p <label>   scope local search to one CCFIND_PROFILES profile
   <label> ...  positional shorthand for -p (e.g. `ccfind work foo`; flags first)
@@ -35,6 +36,11 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   merge newest-first with a host column; resume becomes `ssh -t <host> 'cd <cwd> &&
   exec "$SHELL" -ic claude --resume <id>'`. Host precedence: `-H` > env `CCFIND_HOSTS`
   > `.env`. Unreachable host = one stderr line, rest still show.
+- **Which machines (`-r`/`-H` widen, `-R`/`-l` exclude):** `-r`/`-H` ADD hosts to the
+  local search; the local walk is otherwise unconditional. `-R`/`--remote-only` takes
+  the same host list and drops the local half — it is the only way to reach one host
+  alone (`-R -H quim`). `-R` + `-l` is an error (nothing left to search), as is `-R`
+  with no host resolved; `-p`/`<label>` under `-R` warns, since it scopes local only.
 - **Remote profiles:** the worker looks for a ccfind ON the host (`$CCFIND_REMOTE_PATH`,
   `~/ccfind/ccfind.zsh`, `~/.zsh/…`, `~/.config/…` — `command -v` can't see a shell
   function) and runs `ccfind --tsv -l` there — **every** candidate is tried until one answers, so a stale clone at an earlier path can't shadow a current one, so that host's own `.env` decides its
