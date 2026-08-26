@@ -497,6 +497,109 @@ JSONL
   assert_contains "$output" "ssh -t fakehost"
 }
 
+# --- -R/--remote-only: the hosts INSTEAD of local ---------------------------
+# -r/-H widen the search (hosts + local); -R substitutes (hosts, no local). The
+# pair of tests below is the contract: the same fixture, the same host, and the
+# only difference is whether the local hit comes back.
+
+@test "-H alone widens: the local hit comes back alongside the remote one" {
+  install_ssh_stub
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" LOCAL1 "anything"
+  run_ccfind -H fakehost -N anything
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "fakehost:/remote/proj"
+  assert_contains "$output" "LOCAL1"
+}
+
+@test "-R searches the named host and NOT local" {
+  install_ssh_stub
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" LOCAL1 "anything"
+  run_ccfind -R -H fakehost -N anything
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "fakehost:/remote/proj"
+  refute_contains "$output" "LOCAL1"
+}
+
+@test "-R with no query lists that host's sessions only" {
+  install_ssh_stub
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" LOCAL1 "anything"
+  run_ccfind -R -H fakehost -N
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "fakehost:/remote/proj"
+  refute_contains "$output" "LOCAL1"
+}
+
+@test "-R takes CCFIND_HOSTS when -H is absent" {
+  install_ssh_stub
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" LOCAL1 "anything"
+  export CCFIND_HOSTS="fakehost"
+  run_ccfind -R -N anything
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "fakehost:/remote/proj"
+  refute_contains "$output" "LOCAL1"
+}
+
+@test "-R skips the local walk even when every local profile is configured" {
+  install_ssh_stub
+  mkdir -p "$BATS_TEST_TMPDIR/work/projects" "$BATS_TEST_TMPDIR/personal/projects"
+  mk_session "$BATS_TEST_TMPDIR/work" "$BATS_TEST_TMPDIR/proj" WORK1 "anything"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/proj" PERS1 "anything"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work personal:$BATS_TEST_TMPDIR/personal"
+  run_ccfind -R -H fakehost -N anything
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "fakehost:/remote/proj"
+  refute_contains "$output" "WORK1"
+  refute_contains "$output" "PERS1"
+}
+
+# -R with nothing to dial searches precisely nothing. Reporting that as "No
+# matching sessions" would read as "the host has none" — the one conclusion it
+# cannot support — so it is an error instead.
+@test "-R with no hosts configured is an error, not an empty list" {
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" LOCAL1 "anything"
+  run_ccfind -R -N anything
+  [ "$status" -eq 2 ]
+  assert_contains "$output" "no hosts to search"
+  refute_contains "$output" "No matching sessions"
+  refute_contains "$output" "LOCAL1"
+}
+
+@test "-R and -l are mutually exclusive" {
+  install_ssh_stub
+  export CCFIND_HOSTS="fakehost"
+  run_ccfind -R -l -N anything
+  [ "$status" -eq 2 ]
+  assert_contains "$output" "mutually exclusive"
+}
+
+# A profile is a local seat, so -p under -R filters a set nobody is searching.
+@test "-p under -R warns that it scopes the local search" {
+  install_ssh_stub
+  mkdir -p "$BATS_TEST_TMPDIR/work/projects"
+  export CCFIND_PROFILES="work:$BATS_TEST_TMPDIR/work"
+  run_ccfind -R -H fakehost -p work -N anything
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "has no effect with -R"
+  assert_contains "$output" "fakehost:/remote/proj"
+}
+
+@test "-R reports what it covered when a host has no match" {
+  install_ssh_stub_bare_host
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" LOCAL1 "anything"
+  run_ccfind -R -H fakehost -N zzz-no-such-text
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "No matching sessions"
+  assert_contains "$output" "local not searched"
+  refute_contains "$output" "profiles:"
+}
+
+@test "-R -v says local was skipped" {
+  install_ssh_stub
+  run_ccfind -R -H fakehost -v -N anything
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "local not searched (-R)"
+}
+
 @test "CCFIND_REMOTE_RESUME overrides the remote resume command" {
   install_ssh_stub
   export CCFIND_REMOTE_RESUME="my-resume"

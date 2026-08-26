@@ -382,6 +382,8 @@ function _ccfind_tab_shift() {
 #   ccfind -l <text...>         force local only (trumps -r / -H)
 #   ccfind -H "host-a host-b" ... search these ssh hosts (implies remote,
 #                               overrides CCFIND_HOSTS)
+#   ccfind -R <text...>         search the hosts INSTEAD of local, not as well
+#                               (`ccfind -R -H quim` → that one host alone)
 #   ccfind <profile> <text...>  scope the LOCAL search to one CCFIND_PROFILES
 #   ccfind -p <profile> <text>  profile (e.g. `ccfind work foo`); omit it to
 #                               search every configured profile at once
@@ -401,7 +403,12 @@ function _ccfind_tab_shift() {
 # local ones and get a host column; Enter resumes over `ssh -t <host>` (via
 # an interactive shell, so PATH + any `claude` wrapper apply), and the
 # → preview fetches the remote transcript on demand.
-# Without -r/-H (the default) the search is purely local.
+# Without -r/-H (the default) the search is purely local. Those two WIDEN the
+# search — the hosts are added to it, never substituted for it — so the third
+# scope, "that machine and not this one", is -R/--remote-only: it takes the same
+# host list from -H or CCFIND_HOSTS and drops the local half. -R and -l are the
+# two exclusions and cannot be combined; -R with no host to dial is an error, not
+# an empty list.
 # Remote resume is overridable: set CCFIND_REMOTE_RESUME to a command/function and
 # ccfind calls `<cmd> <host> <cwd> <session-id>` instead of its built-in ssh — e.g.
 # to attach the session inside tmux/screen so it survives a dropped connection.
@@ -420,7 +427,7 @@ function ccfind() {
   local max="${CCFIND_MAX:-10}"
   local scope="" exact=0
   local interactive="${CCFIND_INTERACTIVE:-1}" interactive_forced=0
-  local hosts_override="" local_only=0 remote=0 prof_filter="" color_override=""
+  local hosts_override="" local_only=0 remote=0 remote_only=0 prof_filter="" color_override=""
   local emit="" verbose=0 case_override=""
   # Every colour slot _ccfind_colors fills. Declared local here (it assigns into
   # its caller's scope) so no SGR variable ever leaks into the interactive shell.
@@ -440,6 +447,7 @@ function ccfind() {
       -i|--interactive) interactive=1; interactive_forced=1; shift ;;
       -N|--no-interactive) interactive=0; shift ;;
       -r|--remote) remote=1; shift ;;
+      -R|--remote-only) remote=1; remote_only=1; shift ;;
       -l|--local) local_only=1; shift ;;
       -H|--hosts) hosts_override="$2"; shift 2 ;;
       -p|--profile) prof_filter="$2"; shift 2 ;;
@@ -451,7 +459,7 @@ function ccfind() {
       --tsv) emit=tsv; shift ;;
       -v|--verbose) verbose=1; shift ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-r|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
+        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-r|-R|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
         echo "  -d <dir> scopes to that dir AND everything below it; -x/--exact narrows to"
         echo "  that one dir only (no subdirectories), and defaults the dir to \$PWD"
         echo "  matching is case-insensitive by default: -s/--case-sensitive forces case to"
@@ -459,6 +467,8 @@ function ccfind() {
         echo "  only when the query itself has a capital (CCFIND_CASE sets the default)"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
+        echo "  -r/-H ADD the hosts to the local search; -R/--remote-only searches the hosts"
+        echo "  INSTEAD of local (-R -H quim = that host alone). -R and -l are exclusive"
         echo "  multi-profile (CCFIND_PROFILES): -p <label>, or a leading <label> arg, scopes to one profile"
         echo "  -C/--no-color strips the colour (as do NO_COLOR=1 and CCFIND_COLOR=never); output is"
         echo "  plain whenever stdout is not a terminal, so piping is unaffected either way"
@@ -760,22 +770,41 @@ function ccfind() {
       print -u2 -r -- "${_CCF_ERR}ccfind: unknown profile '$prof_filter'${_CCF_OFF} (configured: ${prof_labels[*]})"
       return 2
     fi
+    # A profile is a LOCAL seat, and -R searches no local seat. Narrowing a set
+    # that is not being searched is a no-op the caller cannot see, so name it
+    # rather than hand back a host list that quietly ignored the filter.
+    (( remote_only )) && print -u2 -r -- "${_CCF_WARN}ccfind: -p '$prof_filter' has no effect with -R${_CCF_OFF} (it scopes the local search; -R searches hosts only)"
     prof_labels=("$prof_filter"); prof_roots=("${prof_cfgdir[$prof_filter]}/projects")
   fi
 
   # ---- Remote hosts — opt-in per call: -H names an explicit list; -r pulls in
   # the configured CCFIND_HOSTS; neither → local only. -l trumps both.
+  # -R drops local, -l drops the hosts: together they drop everything, and no
+  # reading of that is worth guessing at. (-l over -r is a different thing and
+  # still fine — it is how you take the `ccfindr` alias back for one call.)
+  if (( remote_only && local_only )); then
+    print -u2 -r -- "${_CCF_ERR}ccfind: -R and -l are mutually exclusive${_CCF_OFF} (-R searches the hosts only, -l searches local only)"
+    return 2
+  fi
   local hosts_raw="" tabs_cfg="$_cfg_tabs"
   if (( ! local_only )); then
     if [[ -n "$hosts_override" ]]; then
       hosts_raw="$hosts_override"
     elif (( remote )); then
       hosts_raw="$_cfg_hosts"
-      [[ -z "$hosts_raw" ]] && print -u2 -r -- "${_CCF_WARN}ccfind: -r given but no CCFIND_HOSTS configured${_CCF_OFF} (env or the .env beside ccfind.zsh) — searching locally"
+      [[ -z "$hosts_raw" ]] && (( ! remote_only )) && print -u2 -r -- "${_CCF_WARN}ccfind: -r given but no CCFIND_HOSTS configured${_CCF_OFF} (env or the .env beside ccfind.zsh) — searching locally"
     fi
   fi
   local -a remote_hosts
   remote_hosts=(${(s: :)${hosts_raw//,/ }})
+
+  # -R with no host to fan out to searches precisely nothing. That is a mistyped
+  # call, not an empty result — reporting it as "No matching sessions" would read
+  # as "the host has none", which is the one conclusion it does not support.
+  if (( remote_only && ${#remote_hosts} == 0 )); then
+    print -u2 -r -- "${_CCF_ERR}ccfind: -R given but no hosts to search${_CCF_OFF} (name them with -H, or set CCFIND_HOSTS in the env or the .env beside ccfind.zsh)"
+    return 2
+  fi
 
   local _any_local=0 _r0
   for _r0 in "${prof_roots[@]}"; do [[ -d "$_r0" ]] && { _any_local=1; break; }; done
@@ -1015,7 +1044,12 @@ RSEOF
   local -a records
   local local_count=0 _projdir_total=0
   local _pi _plabel _proot _pfxlabel
-  for (( _pi = 1; _pi <= ${#prof_labels}; _pi++ )); do
+  # -R/--remote-only skips the local walk outright — note the `! remote_only` in
+  # the loop condition. The profile table above is still resolved even so: the
+  # tab labels, the positional <label> parse and the preview all read it, and
+  # only the scan is skipped.
+  (( remote_only && verbose )) && print -u2 -r -- "${_CCF_DIM}ccfind: local not searched (-R) — hosts only: ${(j:, :)remote_hosts}${_CCF_OFF}"
+  for (( _pi = 1; _pi <= ${#prof_labels} && ! remote_only; _pi++ )); do
     _plabel="${prof_labels[$_pi]}"
     _proot="${prof_roots[$_pi]}"
     # An unconfigured machine has one nameless profile: the label stays empty so
@@ -1128,7 +1162,8 @@ RSEOF
     # Only when it is ON: an insensitive search is the default, and naming it
     # here would pad every empty result with a line that rules nothing out.
     (( csens )) && _what+=("case-sensitive")
-    (( profiles_on )) && _what+=("profiles: ${(j:, :)prof_labels}")
+    (( profiles_on && ! remote_only )) && _what+=("profiles: ${(j:, :)prof_labels}")
+    (( remote_only )) && _what+=("hosts only (-R), local not searched")
     (( ${#remote_hosts} > 0 )) && _what+=("hosts: ${(j:, :)remote_hosts}")
     [[ -n "$abs" ]] && { (( exact )) && _what+=("in $abs only") || _what+=("under $abs") }
     (( ${#_what} > 0 )) && print -r -- "${_CCF_DIM}   ${(j: · :)_what}${_CCF_OFF}"

@@ -49,6 +49,7 @@ ccfind [-d <dir>] [-n <max>]       # no query → just list the most recent sess
 ccfind -r <text...>                # also search the configured remote hosts (CCFIND_HOSTS)
 ccfindr <text...>                  # alias for `ccfind -r` (define in ~/.zshrc)
 ccfind -H "host-a host-b" <text...># search these ssh hosts (implies remote, overrides CCFIND_HOSTS)
+ccfind -R <text...>                # search the hosts INSTEAD of local (-R -H quim → that host alone)
 ccfind -l <text...>                # force local only (trumps -r / -H)
 ccfind <profile> <text...>         # scope local search to one CCFIND_PROFILES profile
 ccfind -p <profile> <text...>      # same, explicit form
@@ -339,6 +340,12 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
   searches an explicit list (implies remote, no `-r` needed); `-l`/`--local` forces
   local and trumps both. Host-list precedence: `-H` > exported `CCFIND_HOSTS` >
   `.env`. `-r` with no list configured warns on stderr and searches locally.
+- **`-r` and `-H` widen; `-R` substitutes.** Both of the first two *add* the hosts to
+  the local search — local is otherwise always searched — which is right when you are
+  hunting a session and don't recall which machine it was on. When you do know,
+  `-R`/`--remote-only` takes the same host list and drops the local half, so
+  `ccfind -R -H quim` is quim and nothing else. See **Searching one host, and only
+  that host** below.
 - **Failure is soft:** an unreachable host prints one
   `ccfind: remote search failed on: <host>` line to stderr and the rest still show.
 - **`-d <dir>` / `-x` scoping** applies to the remotes too, but the path is resolved
@@ -346,6 +353,41 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
   hosts, a no-op filter otherwise. A host running a ccfind too old to know `-x`
   still narrows correctly: it declines the flag, and the worker's built-in
   fallback search applies the exact scope itself.
+
+### Searching one host, and only that host
+
+`-r` and `-H` are *widening* flags: they add the hosts to the local search rather
+than replacing it, which is what you want when you're trying to find a session and
+can't remember which machine it happened on. It is not what you want once you do
+know — `ccfind -H quim foo` still walks every local profile, and `ccfind quim foo`
+searches locally for the *word* "quim" (the bare-label shorthand resolves profile
+labels, never host names).
+
+`-R`/`--remote-only` is the third scope: the same host list, without the local half.
+
+```zsh
+ccfind -R -H quim <text...>    # quim alone
+ccfind -R -H quim -n 50        # …and with no query: everything resumable on quim
+ccfind -R -H "xavi,quim" foo   # both hosts, no local (the list splits on commas too)
+ccfind -R foo                  # every host in CCFIND_HOSTS, no local
+```
+
+It composes with everything else — `-d`/`-x` scoping, the case flags, `-j`/`--tsv`,
+the picker and its tabs (local profile tabs simply don't appear, since a view with
+no hits gets no tab).
+
+Two things it deliberately refuses rather than guesses at:
+
+- **`-R` with `-l`** exits 2. `-l` drops the hosts and `-R` drops local; together
+  they leave nothing to search. (`-l` overriding `-r` is a different case and still
+  works — that's how you take the `ccfindr` alias back for one call.)
+- **`-R` with no host resolved** — none configured and none passed — exits 2 rather
+  than printing `No matching sessions.`, which would read as "that host has none"
+  when the truth is that no host was ever dialled.
+
+`-p <label>` (and the bare-label shorthand) scopes the *local* search, so under `-R`
+it has nothing to act on and warns instead of silently doing nothing. To narrow to
+one seat on a remote host, let that host's own ccfind do it — see below.
 
 ### Profiles on remote hosts
 
