@@ -812,7 +812,7 @@ JSONL
   run_ccfind -i deploy
   [ "$status" -eq 0 ]          # stub exits 130 = cancelled → nothing resumed
   [ -s "$FZF_ROWS" ]
-  assert_contains "$(cat "$FZF_ARGV")" "--with-nth=10"
+  assert_contains "$(cat "$FZF_ARGV")" "--with-nth=11"
 }
 
 @test "picker rows keep the data fields plain behind the display field" {
@@ -822,8 +822,8 @@ JSONL
   run_ccfind -i deploy
   [ "$status" -eq 0 ]
   local row; row="$(head -1 "$FZF_ROWS")"
-  # 10 fields: host, profile, cfgdir, id, cwd, ts, snippet, path, epoch, display
-  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 10 ]
+  # 11 fields: host, profile, cfgdir, id, cwd, ts, snippet, path, epoch, title, display
+  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 11 ]
   # the data fields are what the resume and the preview read — no SGR in them,
   # or a host stops matching and a path stops opening.
   [ "$(cut -f1 <<<"$row")" = "local" ]
@@ -833,9 +833,9 @@ JSONL
   assert_contains "$(cut -f8 <<<"$row")" "/projects/-proj-a/s1.jsonl"
   # field 9 is the epoch the age is measured from — a bare number, not a date
   assert_equal "$(cut -f9 <<<"$row" | grep -c '^[0-9][0-9]*$')" "1"
-  # …while field 10, the one fzf shows, carries the colour and the columns
-  assert_contains "$(cut -f10 <<<"$row")" $'\033['
-  assert_contains "$(cut -f10 <<<"$row")" "/proj/a"
+  # …while field 11, the one fzf shows, carries the colour and the columns
+  assert_contains "$(cut -f11 <<<"$row")" $'\033['
+  assert_contains "$(cut -f11 <<<"$row")" "/proj/a"
 }
 
 @test "the picker gets one row per hit, newest first" {
@@ -893,8 +893,8 @@ JSONL
   mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
   run_ccfind --tsv deploy
   assert_equal "$status" 0
-  # epoch, profile, cfgdir, id, cwd, mtime, snippet, path
-  assert_equal "$(awk -F'\t' '{print NF}' <<<"$output")" 8
+  # epoch, profile, cfgdir, id, cwd, mtime, snippet, path, title
+  assert_equal "$(awk -F'\t' '{print NF}' <<<"$output")" 9
   assert_equal "$(cut -f4 <<<"$output")" "s1"
   assert_equal "$(cut -f5 <<<"$output")" "/proj/a"
 }
@@ -1493,7 +1493,7 @@ STUB
   age_session "$FIXHOME/.claude" "/proj/a" s1 18000
   run_ccfind --tsv deploy
   assert_equal "$status" 0
-  assert_equal "$(awk -F'\t' '{print NF}' <<<"$output")" 8
+  assert_equal "$(awk -F'\t' '{print NF}' <<<"$output")" 9
   assert_equal "$(cut -f1 <<<"$output")" "1749982000"
   refute_contains "$output" "ago"
   run_ccfind --json deploy
@@ -1508,7 +1508,7 @@ STUB
   run_ccfind -i deploy
   assert_equal "$status" 0
   local row; row="$(head -1 "$FZF_ROWS")"
-  assert_contains "$(cut -f10 <<<"$row")" "(5h ago)"
+  assert_contains "$(cut -f11 <<<"$row")" "(5h ago)"
   assert_equal    "$(cut -f9  <<<"$row")" "1749982000"
 }
 
@@ -1521,7 +1521,7 @@ STUB
   run_ccfind -i termx
   assert_equal "$status" 0
   local row; row="$(head -1 "$FZF_ROWS")"
-  assert_contains "$(cut -f10 <<<"$row")" "~/code/app"     # what you read
+  assert_contains "$(cut -f11 <<<"$row")" "~/code/app"     # what you read
   assert_equal    "$(cut -f5 <<<"$row")" "$FIXHOME/code/app"   # what it cds to
 }
 
@@ -1534,7 +1534,7 @@ STUB
   export CCFIND_COLOR=always
   run_ccfind -i NEEDLE
   assert_equal "$status" 0
-  local disp; disp="$(cut -f10 < "$FZF_ROWS")"
+  local disp; disp="$(cut -f11 < "$FZF_ROWS")"
   assert_contains "$disp" "…"                     # the lead-in was cut
   # the match sits within ~14 characters of where the snippet column starts
   run python3 -c '
@@ -1801,4 +1801,113 @@ STALE
   install_claude_profile_stub
   local n; n="$(printf '%s' "$PATH" | tr ':' '\n' | grep -cxF "$BATS_TEST_TMPDIR/bin")"
   assert_equal "$n" "1"
+}
+
+# --- session titles ----------------------------------------------------------
+# The name `claude --resume` lists a session under, read from the title records
+# Claude Code appends to the transcript. It is what tells two sessions in one
+# directory apart, so it has to survive every path a hit can take.
+
+@test "title: the flat list shows the session's generated title" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai "Widget deploy pipeline"
+  run_ccfind deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "   Widget deploy pipeline"
+}
+
+@test "title: an untitled session prints no title line" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  run_ccfind deploy
+  assert_equal "$status" 0
+  # time+cwd, snippet, resume — the three lines a hit has always had
+  assert_equal "$(wc -l <<<"$output" | tr -d ' ')" 3
+}
+
+@test "title: the last generated title wins — it is re-written as the session grows" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai "First guess"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai "Settled title"
+  run_ccfind --json deploy
+  run python3 -c 'import json,sys; print(json.load(sys.stdin)["results"][0]["title"])' <<<"$output"
+  assert_equal "$output" "Settled title"
+}
+
+@test "title: a /rename beats the generated title, whichever came last" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 custom "My name for it"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai "Generated later"
+  run_ccfind --json deploy
+  run python3 -c 'import json,sys; print(json.load(sys.stdin)["results"][0]["title"])' <<<"$output"
+  assert_equal "$output" "My name for it"
+}
+
+@test "title: the legacy summary record is used when nothing newer exists" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 summary "Old-style summary"
+  run_ccfind deploy
+  assert_contains "$output" "Old-style summary"
+}
+
+@test "title: a transcript that merely mentions a title record has no title" {
+  # Inside a message the quotes are escaped, so only a real record may match.
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 'deploy {\"type\":\"ai-title\",\"aiTitle\":\"fake\"}'
+  run_ccfind --json deploy
+  run python3 -c 'import json,sys; print(repr(json.load(sys.stdin)["results"][0]["title"]))' <<<"$output"
+  assert_equal "$output" "''"
+}
+
+@test "title: JSON escapes are decoded and nothing can break the record" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai 'Fix \"quoted\" path C:\\tmp\there'
+  run_ccfind --tsv deploy
+  assert_equal "$(awk -F'\t' '{print NF}' <<<"$output")" 9
+  assert_equal "$(cut -f9 <<<"$output")" 'Fix "quoted" path C:\tmp here'
+}
+
+@test "title: --tsv carries it last, so the first 8 fields keep their meaning" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai "Wire title"
+  run_ccfind --tsv deploy
+  assert_contains "$(cut -f8 <<<"$output")" "/projects/-proj-a/s1.jsonl"
+  assert_equal "$(cut -f9 <<<"$output")" "Wire title"
+}
+
+@test "title: the picker shows it, and keeps a plain copy in field 10" {
+  install_fzf_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "deploy the widget"
+  title_session "$FIXHOME/.claude" "/proj/a" s1 ai "Picker title"
+  export CCFIND_COLOR=always
+  run_ccfind -i deploy
+  assert_equal "$status" 0
+  local row; row="$(head -1 "$FZF_ROWS")"
+  assert_equal "$(cut -f10 <<<"$row")" "Picker title"
+  assert_contains "$(cut -f11 <<<"$row")" "Picker title"
+}
+
+@test "title: a remote host running ccfind sends its titles back" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "remote deploy"
+  title_session "$REMOTE_HOME/.claude" "/srv/app" R1 ai "Remote titled session"
+  run_ccfind -R -H nas -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "Remote titled session"
+}
+
+@test "title: a host without ccfind sends titles from the filesystem walk too" {
+  install_ssh_stub_bare_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "remote deploy"
+  title_session "$REMOTE_HOME/.claude" "/srv/app" R1 ai "Bare host title"
+  run_ccfind -R -H nas -N deploy
+  assert_equal "$status" 0
+  assert_contains "$output" "Bare host title"
+}
+
+@test "title: a host too old to send titles still parses, path intact" {
+  # The canned stub speaks the 8-field wire of a pre-title ccfind.
+  install_ssh_stub
+  run_ccfind -R -H fakehost --json anything
+  assert_equal "$status" 0
+  run python3 -c 'import json,sys; r=json.load(sys.stdin)["results"][0]; print(r["path"], repr(r["title"]), r["epoch"])' <<<"$output"
+  assert_equal "$output" "/remote/proj/RID123.jsonl '' 1700000000"
 }

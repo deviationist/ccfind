@@ -90,6 +90,13 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   `--json` carries the resolved boolean (`case_sensitive`) beside the mode it came
   from (`case_mode`); `_ccfind_hl`'s 4th arg and `CCFIND_PV_CASE` keep the list and
   preview highlights marking exactly what the grep matched.
+- **Session title:** the name `claude --resume` shows, read from the transcript's own
+  title records — last `custom-title` (`/rename`) beats last `ai-title` (generated,
+  rewritten as the session grows) beats legacy `summary`. One awk program
+  (`_CCFIND_TITLE_AWK`) does the pick + de-escape for both the local path and the
+  remote worker's fallback walk (prepended to the worker as `title_awk=`). Shown as a
+  bold line in the flat list, a column in the picker (capped at 48, absent when no row
+  has one), the preview's header, and `title` in `--json`/`--tsv` (TSV field 9, last).
 - **Time column:** every record carries the mtime as a string *and* the epoch it
   came from, so the age is computed at display time, never stored. Default `both`
   renders `2026-08-20 14:32:05  (5h ago)`; `CCFIND_TIME=abs` is the mtime alone
@@ -102,8 +109,9 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   host, bold yellow = the search term inside every snippet (list, picker and preview),
   green = the resume command, dim = timestamps/separators. Off whenever stdout is not
   a terminal, so piped output stays byte-plain; `CCFIND_COLOR=always|never`, `NO_COLOR`
-  and `-C` override. The picker composes one pre-padded display field (TSV field 7,
-  `--with-nth=7`) so columns align; fields 1-6 stay plain for the resume/preview/tabs.
+  and `-C` override. Bold = the session title. The picker composes one pre-padded
+  display field (field 11, `--with-nth=11`) so columns align; fields 1-10 stay plain
+  for the resume/preview/tabs.
 - **Tab views (`CCFIND_TABS=1`, multi-host/multi-profile picker, fzf ≥ 0.45):** header
   bar `All │ <profile> │ <host>…`, Tab/Shift-Tab cycle; each tab shows its own newest
   hits. Silently off below fzf 0.45.
@@ -130,11 +138,13 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   never leaks into the interactive shell.
 - Portable across macOS (BSD `stat`) and Linux (GNU `stat`); no bashisms.
 - Record schema (internal): `epoch \t host \t profile \t cfgdir \t id \t cwd \t ts \t
-  snippet \t path`. For display the leading epoch moves to the BACK (field 9), so
-  fields 1-8 keep the positions the fzf bindings name (`{1}` host, `{8}` path); the
-  picker then appends a 10th composed display field and shows only that
-  (`--with-nth=10`). `_ccfind_parse_row` therefore takes path non-greedily and
-  tolerates 8-, 9- and 10-field rows. Colour lives in the display field ONLY — the
+  snippet \t path \t title`. For display (`_ccfind_rec2row`) the leading epoch moves
+  to field 9, before the title (field 10), so fields 1-8 keep the positions the fzf
+  bindings name (`{1}` host, `{8}` path); the picker then appends an 11th composed
+  display field and shows only that (`--with-nth=11`). `_ccfind_parse_row` takes
+  path/epoch/title non-greedily and tolerates 10- and 11-field rows. EVERY record
+  carries the title field — a pre-title host's 8-field wire line is padded at ingest,
+  or its path would be read as the title. Colour lives in the display field ONLY — the
   data fields must stay parseable.
 - Tests: `tests/run.sh` (bats; flat-list path, so no fzf/ssh/TTY needed). **Assert via
   `assert_contains`/`refute_contains`/`assert_equal`, never a bare `[[ … ]]`** — a
