@@ -29,10 +29,10 @@ function _ccfind_colors() {
     _CCF_OFF=$'\033[0m'    _CCF_DIM=$'\033[2m'     _CCF_TS=$'\033[1m'
     _CCF_PROF=$'\033[36m'  _CCF_HOST=$'\033[35m'   _CCF_SNIP=$'\033[2m'
     _CCF_HIT=$'\033[1;33m' _CCF_CMD=$'\033[32m'    _CCF_KEY=$'\033[1m'
-    _CCF_WARN=$'\033[33m'  _CCF_ERR=$'\033[31m'
+    _CCF_WARN=$'\033[33m'  _CCF_ERR=$'\033[31m'   _CCF_TITLE=$'\033[1m'
   else
     _CCF_OFF='' _CCF_DIM='' _CCF_TS='' _CCF_PROF='' _CCF_HOST='' _CCF_SNIP=''
-    _CCF_HIT='' _CCF_CMD='' _CCF_KEY='' _CCF_WARN='' _CCF_ERR=''
+    _CCF_HIT='' _CCF_CMD='' _CCF_KEY='' _CCF_WARN='' _CCF_ERR='' _CCF_TITLE=''
   fi
 }
 
@@ -175,6 +175,61 @@ function _ccfind_json_str() {
   print -rn -- "\"$s\""
 }
 
+# ---- session title -----------------------------------------------------------
+# The name `claude --resume` lists a session under. Claude Code appends it to the
+# transcript as a record of its own, re-written as the session goes on, so the
+# LAST one is current. Three kinds, most deliberate first:
+#
+#   {"type":"custom-title","customTitle":"…"}   /rename — what you called it
+#   {"type":"ai-title","aiTitle":"…"}           generated, the usual case
+#   {"type":"summary","summary":"…"}            what older versions wrote instead
+#
+# Matching `"type":"ai-title"` unescaped is safe against a transcript that merely
+# *mentions* the string: inside a JSON string value its quotes are escaped (\"),
+# so only a real top-level record can match.
+#
+# awk, not jq or python: this also runs in the remote worker's POSIX fallback on
+# hosts that have neither, and the selection plus the de-escaping is one pass.
+# The value is decoded just far enough to be a single TSV-safe line — the common
+# escapes undone, control escapes turned into spaces, \uXXXX dropped (Claude Code
+# writes non-ASCII raw, so in practice that is only control characters).
+# Kept free of single quotes: the worker receives it ${(qq)}-quoted.
+typeset -g _CCFIND_TITLE_AWK='
+index($0, "\"type\":\"custom-title\"") { c = $0; next }
+index($0, "\"type\":\"ai-title\"")     { a = $0; next }
+index($0, "\"type\":\"summary\"")      { s = $0; next }
+END {
+  if (c != "")      { l = c; k = "customTitle" }
+  else if (a != "") { l = a; k = "aiTitle" }
+  else if (s != "") { l = s; k = "summary" }
+  else exit
+  key = "\"" k "\":\""
+  p = index(l, key); if (!p) exit
+  r = substr(l, p + length(key)); out = ""
+  while (length(r) > 0) {
+    ch = substr(r, 1, 1)
+    if (ch == "\"") break
+    if (ch == "\\") {
+      n = substr(r, 2, 1)
+      if (n == "u")                             { r = substr(r, 7); continue }
+      if (n == "n" || n == "t" || n == "r" || n == "b" || n == "f") out = out " "
+      else                                        out = out n
+      r = substr(r, 3); continue
+    }
+    out = out ch; r = substr(r, 2)
+  }
+  gsub(/[[:cntrl:]]/, " ", out)
+  print out
+}'
+
+# _ccfind_title <file> — print the session's current title, or nothing. The grep
+# narrows a multi-megabyte transcript to its handful of title records before awk
+# sees a byte of it.
+function _ccfind_title() {
+  grep -E '"type":"(custom-title|ai-title|summary)"' -- "$1" 2>/dev/null \
+    | awk "$_CCFIND_TITLE_AWK"
+}
+
 # Render the last few user/assistant messages of a transcript file for the
 # fzf preview pane. Defined at top level (not nested in ccfind) so the
 # preview subshell can source-and-call it cleanly.
@@ -308,6 +363,25 @@ for line in lines:
         text = text[:MAX_CHARS] + f"{DIM}…[truncated]{RESET}"
     records.append((t, text))
 
+# The session's name, as `claude --resume` lists it: the last title record of
+# the most deliberate kind (/rename, then generated, then legacy summary) — the
+# same choice _CCFIND_TITLE_AWK makes for the list.
+title = ""
+for kind, key in (("custom-title", "customTitle"), ("ai-title", "aiTitle"), ("summary", "summary")):
+    for line in reversed(lines):
+        if f'"type":"{kind}"' not in line:
+            continue
+        try:
+            title = json.loads(line).get(key) or ""
+        except Exception:
+            continue
+        if title:
+            break
+    if title:
+        break
+if title:
+    print(f"{BOLD}{hl(' '.join(str(title).split()), BOLD)}{RESET}\n")
+
 total = len(records)
 records = records[-MAX_MSGS:]
 if not records:
@@ -432,11 +506,11 @@ function ccfind() {
   # Every colour slot _ccfind_colors fills. Declared local here (it assigns into
   # its caller's scope) so no SGR variable ever leaks into the interactive shell.
   local _CCF_OFF _CCF_DIM _CCF_TS _CCF_PROF _CCF_HOST _CCF_SNIP _CCF_HIT \
-        _CCF_CMD _CCF_KEY _CCF_WARN _CCF_ERR
+        _CCF_CMD _CCF_KEY _CCF_WARN _CCF_ERR _CCF_TITLE
   # The fields a parsed row unpacks into, and the search scope — declared here
   # because the parser and the emitter below close over them and are defined
   # (and called) before the code that fills them in.
-  local _f _id _cwd _ts _snippet _host _profile _cfgdir _path _epoch _rest
+  local _f _id _cwd _ts _snippet _host _profile _cfgdir _path _epoch _title _rest
   local abs="" enc="" query=""
 
   while [[ "$1" == -* ]]; do
@@ -575,16 +649,18 @@ function ccfind() {
   }
 
   # Sequential field parser for a row:
-  #   host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t epoch
+  #   host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t epoch \t title
   # Sequential rather than a split so an empty field — an unconfigured machine
-  # has no profile label — stays an empty field instead of vanishing.
+  # has no profile label, an untitled session no title — stays an empty field
+  # instead of vanishing.
   #
-  # The epoch rides at the END rather than the front (where the sortable record
-  # keeps it) so that fields 1-8 hold the positions the fzf bindings name. Rows
-  # reach here in three lengths: 8 fields from the emitter, which reads the
-  # epoch off the record itself; 9 as displayed; 10 back out of the picker, with
-  # the composed display field appended. Hence path is taken non-greedily and a
-  # missing 9th field leaves _epoch empty rather than a copy of the path.
+  # The epoch rides near the END rather than the front (where the sortable
+  # record keeps it) so that fields 1-8 hold the positions the fzf bindings
+  # name; the title came later and goes after it, so nothing older moved. Rows
+  # reach here as 10 fields (_ccfind_rec2row's output) or 11 back out of the
+  # picker, with the composed display field appended. Path, epoch and title are
+  # each taken non-greedily, and a missing field reads as empty rather than as a
+  # copy of its neighbour.
   _ccfind_parse_row() {
     _rest="$1"
     [[ "$_rest" == *$'\033['* ]] && _rest="$(_ccfind_strip_sgr "$_rest")"
@@ -596,8 +672,21 @@ function ccfind() {
     _ts="${_rest%%$'\t'*}";      _rest="${_rest#*$'\t'}"
     _snippet="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
     _path="${_rest%%$'\t'*}"
-    if [[ "$_rest" == *$'\t'* ]]; then _epoch="${${_rest#*$'\t'}%%$'\t'*}"
-    else                               _epoch=""; fi
+    _epoch="" _title=""
+    [[ "$_rest" == *$'\t'* ]] || return 0
+    _rest="${_rest#*$'\t'}"; _epoch="${_rest%%$'\t'*}"
+    [[ "$_rest" == *$'\t'* ]] || return 0
+    _rest="${_rest#*$'\t'}"; _title="${_rest%%$'\t'*}"
+  }
+
+  # _ccfind_rec2row <record> — the sortable record (epoch first, title last)
+  # as a row (epoch second-to-last), into $_row. Every record carries the
+  # title field, empty or not — remote ones are padded at ingest — so the last
+  # tab always splits the title off.
+  local _row
+  _ccfind_rec2row() {
+    local _body="${1#*$'\t'}"
+    _row="${_body%$'\t'*}"$'\t'"${1%%$'\t'*}"$'\t'"${_body##*$'\t'}"
   }
 
   # A row's own machine: "local" is this one, anything else is an ssh alias.
@@ -625,7 +714,7 @@ function ccfind() {
   # a document belongs is indistinguishable from a broken run — and the remote
   # worker would happily parse that sentence into a record.
   _ccfind_emit() {
-    local _e_epoch _first=1
+    local _first=1
     # Take the slice once, and drop empties: in zsh — unlike bash — slicing an
     # array that was never assigned yields a single EMPTY element under quotes,
     # which is exactly the shape the no-results exits call this with, and it
@@ -636,10 +725,11 @@ function ccfind() {
     if [[ "$emit" == tsv ]]; then
       # epoch first, host dropped: the caller of a remote worker knows which
       # host it dialled, and a machine there cannot know what alias it answers to.
+      # The title rides LAST so the wire stays a superset of what it was: a
+      # caller that predates titles reads the first 8 fields as it always has.
       for _r in "${_recs[@]}"; do
-        _e_epoch="${_r%%$'\t'*}"
-        _ccfind_parse_row "${_r#*$'\t'}"
-        print -r -- "$_e_epoch"$'\t'"$_profile"$'\t'"$_cfgdir"$'\t'"$_id"$'\t'"$_cwd"$'\t'"$_ts"$'\t'"$_snippet"$'\t'"$_path"
+        _ccfind_rec2row "$_r"; _ccfind_parse_row "$_row"
+        print -r -- "$_epoch"$'\t'"$_profile"$'\t'"$_cfgdir"$'\t'"$_id"$'\t'"$_cwd"$'\t'"$_ts"$'\t'"$_snippet"$'\t'"$_path"$'\t'"$_title"
       done
       return 0
     fi
@@ -659,15 +749,15 @@ function ccfind() {
     print -r -- "  \"truncated\": $( (( ${truncated:-0} )) && print -n true || print -n false ),"
     print -r -- '  "results": ['
     for _r in "${_recs[@]}"; do
-      _e_epoch="${_r%%$'\t'*}"
-      _ccfind_parse_row "${_r#*$'\t'}"
+      _ccfind_rec2row "$_r"; _ccfind_parse_row "$_row"
       (( _first )) || print -r -- ','
       _first=0
       print -rn -- '    {'
-      print -rn -- '"epoch": '"$_e_epoch"', "host": ';    _ccfind_json_str "$_host"
+      print -rn -- '"epoch": '"$_epoch"', "host": ';      _ccfind_json_str "$_host"
       print -rn -- ', "profile": ';                        _ccfind_json_str "$_profile"
       print -rn -- ', "config_dir": ';                     _ccfind_json_str "$_cfgdir"
       print -rn -- ', "id": ';                             _ccfind_json_str "$_id"
+      print -rn -- ', "title": ';                          _ccfind_json_str "$_title"
       print -rn -- ', "cwd": ';                            _ccfind_json_str "$_cwd"
       print -rn -- ', "mtime": ';                          _ccfind_json_str "$_ts"
       print -rn -- ', "snippet": ';                        _ccfind_json_str "$_snippet"
@@ -844,7 +934,7 @@ function ccfind() {
   fi
   if (( ${#remote_hosts} > 0 )); then
     local _rscript
-    _rscript="$(cat <<'RSEOF'
+    _rscript="title_awk=${(qq)_CCFIND_TITLE_AWK}"$'\n'"$(cat <<'RSEOF'
 # ccfind remote worker — runs on each CCFIND_HOSTS host via `ssh <host> sh -s`.
 # args: $1=query (may be empty)  $2=max  $3=encoded cwd-scope prefix (may be
 #       empty)  $4=the -d path as typed (may be empty)  $5=1 for -x
@@ -853,7 +943,7 @@ function ccfind() {
 #
 # Emits one header line, then records:
 #   #ccfind mode=<remote|fallback> [reason=<why>]
-#   epoch<TAB>profile<TAB>cfgdir<TAB>id<TAB>cwd<TAB>mtime<TAB>snippet<TAB>path
+#   epoch<TAB>profile<TAB>cfgdir<TAB>id<TAB>cwd<TAB>mtime<TAB>snippet<TAB>path<TAB>title
 # newest first. The caller prefixes the host it dialled; it never appears here.
 #
 # Two ways to produce those records, tried in that order, in ONE connection —
@@ -980,8 +1070,10 @@ done | sort -t "$tab" -k1,1rn | head -n "$max" | while IFS="$tab" read -r e f; d
     snippet=$(grep $gi -m1 -F -- "$q" "$f" 2>/dev/null | tr -d '\000-\037' \
       | awk -v q="$lq" -v cs="$csens" '{l=(cs=="1"?$0:tolower($0)); p=index(l,q); if(p>0){s=p-45; if(s<1)s=1; print substr($0,s,120)}}')
   fi
+  # $title_awk is prepended to this script by the caller — one copy of the parser.
+  title=$(grep -E '"type":"(custom-title|ai-title|summary)"' "$f" 2>/dev/null | awk "$title_awk")
   # profile and cfgdir: nameless, and the one dir this path knows about.
-  printf '%s\t\t%s\t%s\t%s\t%s\t%s\t%s\n' "$e" "$HOME/.claude" "$id" "$cwd" "$(mt "$f")" "$snippet" "$f"
+  printf '%s\t\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$e" "$HOME/.claude" "$id" "$cwd" "$(mt "$f")" "$snippet" "$f" "$title"
 done
 exit 0
 RSEOF
@@ -1010,13 +1102,14 @@ RSEOF
     _epochfn() { stat -f '%m' "$1"; }
   fi
 
-  # Per-hit field extractor (id, cwd, ts, snippet) — shared by both code
+  # Per-hit field extractor (id, cwd, ts, title, snippet) — shared by both code
   # paths so the picker and the flat list see identical data.
   _ccfind_extract() {
     _f="$1"
     _id="${_f:t:r}"
     _cwd="$(grep -m1 -o '"cwd":"[^"]*"' "$_f" 2>/dev/null | head -1 | sed 's/.*"cwd":"//;s/"$//')"
     _ts="$(_statfn "$_f")"
+    _title="$(_ccfind_title "$_f")"
     if [[ -n "$query" ]]; then
       # The awk pass pulls the 120-char window to the match instead of taking
       # the head of the line, so it has to locate the match the same way grep
@@ -1030,9 +1123,10 @@ RSEOF
   }
 
   # ---- the record schema ---------------------------------------------------
-  #   epoch \t host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path
+  #   epoch \t host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t title
   #
-  # host is "local" or the ssh alias; profile is the label the session's config
+  # title is the session's name as `claude --resume` shows it ("" if it has
+  # none yet — a session only gets one after its first exchange). host is "local" or the ssh alias; profile is the label the session's config
   # dir goes by ("" when the machine it came from has no profiles configured);
   # cfgdir is that dir, on whichever machine `host` names. Carrying the dir on
   # the record is what lets a hit be resumed into its own seat without the
@@ -1086,7 +1180,7 @@ RSEOF
     (( local_count += ${#pfiles} ))
     for _f in "${pfiles[@]:0:$max}"; do
       _ccfind_extract "$_f"
-      records+=("$(_epochfn "$_f")"$'\t'local$'\t'"$_pfxlabel"$'\t'"${prof_cfgdir[$_plabel]}"$'\t'"$_id"$'\t'"${_cwd:-?}"$'\t'"$_ts"$'\t'"${_snippet//$'\t'/ }"$'\t'"$_f")
+      records+=("$(_epochfn "$_f")"$'\t'local$'\t'"$_pfxlabel"$'\t'"${prof_cfgdir[$_plabel]}"$'\t'"$_id"$'\t'"${_cwd:-?}"$'\t'"$_ts"$'\t'"${_snippet//$'\t'/ }"$'\t'"$_f"$'\t'"$_title")
     done
   done
 
@@ -1117,7 +1211,7 @@ RSEOF
     (( _busy )) && printf '\033[2K\r' >&2
     local -a _rfailed
     local -A _rmode _rreason
-    local line _hrc
+    local line _hrc _ltabs
     for h in "${remote_hosts[@]}"; do
       _hrc="$(cat -- "$rtmpdir/${h//\//_}.rc" 2>/dev/null)"
       if [[ "$_hrc" != "0" ]]; then
@@ -1133,6 +1227,10 @@ RSEOF
           [[ "$line" == *reason=* ]] && _rreason[$h]="${line#*reason=}"
           continue
         fi
+        # A host whose ccfind predates titles sends 8 fields; pad it to the 9
+        # every record here carries, or its path would be read as the title.
+        _ltabs="${line//[^$'\t']/}"
+        (( ${#_ltabs} == 7 )) && line+=$'\t'
         records+=("${line%%$'\t'*}"$'\t'"$h"$'\t'"${line#*$'\t'}")
         (( remote_count++ ))
       done <"$rtmpdir/${h//\//_}.tsv"
@@ -1179,14 +1277,14 @@ RSEOF
   # Rows for display/selection — the sortable record with its leading epoch
   # moved to the back, where it cannot shift the field numbers the fzf bindings
   # and the tab-view patterns are written against:
-  # host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t epoch
+  # host \t profile \t cfgdir \t id \t cwd \t ts \t snippet \t path \t epoch \t title
   # rows_all keeps the full sorted list — it feeds the per-host tab views,
   # where a host shows its own newest hits even when none crack the global
   # top-max. rows is the capped slice everything else displays.
   local -a rows_all rows
   local _r
   for _r in "${merged[@]}"; do
-    rows_all+=("${_r#*$'\t'}"$'\t'"${_r%%$'\t'*}")
+    _ccfind_rec2row "$_r"; rows_all+=("$_row")
   done
   rows=("${rows_all[@]:0:$max}")
 
@@ -1239,7 +1337,7 @@ RSEOF
     # what lets the tab views filter on a bare "<label>\t" prefix and the
     # resume path parse fields it can trust. fzf strips the colour back off
     # whatever it hands us on the way out.
-    integer w_host=0 w_cwd=0
+    integer w_host=0 w_cwd=0 w_title=0
     _ccfind_rel_width "${rows[@]}"
     local _dcwd _dlabel
     local _showhost=0
@@ -1256,8 +1354,13 @@ RSEOF
       (( ${#_dlabel} > w_host )) && w_host=${#_dlabel}
       _dcwd="${_cwd/#$HOME/~}"
       (( ${#_dcwd} > w_cwd )) && w_cwd=${#_dcwd}
+      (( ${#_title} > w_title )) && w_title=${#_title}
     done
     (( w_cwd > 44 )) && w_cwd=44          # a deep path must not push the snippet off-screen
+    # The title is what tells two sessions in one dir apart, so it gets a column
+    # of its own — sized to the rows, absent when none of them has a title (no
+    # blank gutter on a host whose Claude predates titles).
+    (( w_title > 48 )) && w_title=48
 
     local _crow _dhost
     _ccfind_disp_row() {   # <raw row> → the row plus a last field, its rendered line
@@ -1279,16 +1382,21 @@ RSEOF
       _ccfind_time_cell $w_rel "$_CCF_DIM"
       _dhost=""
       (( _showhost )) && _dhost="${_crow}${(r:$w_host:)_dlabel}${_CCF_OFF}  "
+      local _dt="" _tt="$_title"
+      if (( w_title )); then
+        (( ${#_tt} > w_title )) && _tt="${_tt[1,w_title-1]}…"
+        _dt="${_CCF_TITLE}$(_ccfind_hl "${(r:$w_title:)_tt}" "$query" "$_CCF_TITLE" "$csens")${_CCF_OFF}  "
+      fi
       # Pad on the plain text, colour after: an SGR run counts toward a string's
       # length but draws nothing, so padding a coloured field skews the column.
-      print -rn -- "$1"$'\t'"${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP" "$csens")${_CCF_OFF}"
+      print -rn -- "$1"$'\t'"${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_dt}${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP" "$csens")${_CCF_OFF}"
     }
 
-    # Field 10 is the composed display line (built below); 1-9 are the data
+    # Field 11 is the composed display line (built below); 1-10 are the data
     # fields, hidden — 1 (host) and 8 (path) feed the preview command, 3/4/5 the
-    # resume, 9 the epoch behind the age. Matching therefore runs over exactly
-    # what you can see.
-    local withnth='10' pvcache=''
+    # resume, 9 the epoch behind the age, 10 the title. Matching therefore runs
+    # over exactly what you can see.
+    local withnth='11' pvcache=''
     if (( ${#remote_hosts} > 0 )); then
       pvcache="$rtmpdir/pv"
       mkdir -p -- "$pvcache"
@@ -1427,6 +1535,8 @@ RSEOF
     # lines down still carries the path in full.
     _ccfind_time_cell $w_rel "$_CCF_TS"
     printf '%s  %s%s\n' "$_tcell" "$_tag" "${${_cwd:-?}/#$HOME/~}"
+    [[ -n "$_title" ]] && \
+      printf '   %s%s%s\n' "$_CCF_TITLE" "$(_ccfind_hl "$_title" "$query" "$_CCF_TITLE" "$csens")" "$_CCF_OFF"
     [[ -n "$_snippet" ]] && \
       printf '   %s…%s…%s\n' "$_CCF_SNIP" "$(_ccfind_hl "$_snippet" "$query" "$_CCF_SNIP" "$csens")" "$_CCF_OFF"
     printf '   %s%s%s\n' "$_CCF_CMD" "$resume" "$_CCF_OFF"

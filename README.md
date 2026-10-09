@@ -10,7 +10,7 @@ session is a `.jsonl` transcript under
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
 <div align="center">
-  <img src="assets/demo-7783b6.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+  <img src="assets/demo-448bf7.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
 </div>
 
 ## Install
@@ -66,7 +66,7 @@ and how long ago that was, which profile or host it belongs to, its working
 directory, and the matching text with the search term picked out.
 
 <div align="center">
-  <img src="assets/picker-7783b6.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+  <img src="assets/picker-448bf7.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
 </div>
 
 | Key | Action |
@@ -85,20 +85,20 @@ before committing to one. On a remote hit the transcript is fetched over ssh on
 demand (once per session, then cached for as long as the picker is open):
 
 <div align="center">
-  <img src="assets/preview-7783b6.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+  <img src="assets/preview-448bf7.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
 </div>
 
 ### Flat-list fallback
 
-Each hit prints the session's timestamp and age + working directory, a snippet centred on
-the match, and the resume command (`cd <dir> && claude --resume <id>` when the
+Each hit prints the session's timestamp and age + working directory, its title, a
+snippet centred on the match, and the resume command (`cd <dir> && claude --resume <id>` when the
 session lived elsewhere, so it reloads in its original project context — correct
 `CLAUDE.md`, relative paths, git — else just `claude --resume <id>`). You get this
 when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`, or
 `CCFIND_INTERACTIVE=0` is set.
 
 <div align="center">
-  <img src="assets/list-7783b6.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+  <img src="assets/list-448bf7.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
 </div>
 
 ```zsh
@@ -452,6 +452,7 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
     {
       "epoch": 1786520941, "host": "nas", "profile": "media",
       "config_dir": "/home/you/.claude-media", "id": "e5710b93",
+      "title": "Nightly backup connection refused",
       "cwd": "/srv/backup", "mtime": "2026-08-12 08:17:41",
       "snippet": "…", "path": "/home/you/.claude-media/projects/-srv-backup/e5710b93.jsonl"
     }
@@ -466,15 +467,18 @@ hits were actually matched and `case_mode` is the setting it came from — under
 to re-derive it. `host` is `local` or the ssh
 alias; `profile` is empty on a machine with no profiles
 configured; `config_dir` is the dir that hit belongs to, *on that machine*, which is
-what a consumer needs to resume it into the right seat. The document is well-formed
+what a consumer needs to resume it into the right seat. `title` is the name
+`claude --resume` lists the session under — a `/rename` if you gave it one, else
+the generated title — and empty for a session too young to have one. The document is well-formed
 even when nothing matched (`"results": []`) — and JSON output never opens the picker
 and is never coloured, whatever else is set.
 
 `--tsv` prints the same records tab-separated, one per line, without the `host`
-column: `epoch, profile, config_dir, id, cwd, mtime, snippet, path`. That is the
+column: `epoch, profile, config_dir, id, cwd, mtime, snippet, path, title`. That is the
 format ccfind speaks to itself over ssh (see **Profiles on remote hosts**), and it
 is stable enough to script against — no escaping to undo, since tabs and control
-characters are stripped from snippets.
+characters are stripped from snippets and titles. `title` came last so the first eight
+columns mean what they always did; a host whose ccfind predates it sends eight.
 
 ### Custom remote resume (tmux, screen, mosh, …)
 
@@ -517,7 +521,7 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 local-only runs, or when `CCFIND_TABS` is unset.
 
 <div align="center">
-  <img src="assets/tabs-7783b6.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+  <img src="assets/tabs-448bf7.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
 </div>
 
 ## Notes
