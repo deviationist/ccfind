@@ -86,6 +86,9 @@ seed() {
 # slices of exactly these lines.
 u() { print -r -- "{\"type\":\"user\",\"cwd\":\"$1\",\"message\":{\"role\":\"user\",\"content\":\"$2\"}}" }
 a() { print -r -- "{\"type\":\"assistant\",\"cwd\":\"$1\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$2\"}]}}" }
+# The generated session title, as Claude Code appends it once a session has a
+# first exchange — what ccfind shows as the hit's name.
+t() { print -r -- "{\"type\":\"ai-title\",\"aiTitle\":\"$1\"}" }
 
 C1="$fakehome/code/api-gateway"
 C2="$fakehome/code-private/ccfind"
@@ -96,15 +99,18 @@ seed "$work" "$C1" 4f2c9a1e 480 \
   "$(u "$C1" 'staging deploy is dead again — connection refused on every request to the pooler')" \
   "$(a "$C1" 'The gateway is dialing 6432 but pgbouncer moved to 5432 in the last chart bump.')" \
   "$(u "$C1" 'so the readiness probe was lying?')" \
-  "$(a "$C1" 'Yes — it probes the container port, not the pooler. Pinning both to 5432 fixes it.')"
+  "$(a "$C1" 'Yes — it probes the container port, not the pooler. Pinning both to 5432 fixes it.')" \
+  "$(t 'Staging pooler port mismatch')"
 
 seed "$personal" "$C2" 7b3e05d4 3300 \
   "$(u "$C2" 'the remote preview says connection refused when the host is only reachable over the VPN')" \
-  "$(a "$C2" 'ssh BatchMode gives up after ConnectTimeout=6 — the preview falls back to a message.')"
+  "$(a "$C2" 'ssh BatchMode gives up after ConnectTimeout=6 — the preview falls back to a message.')" \
+  "$(t 'Remote preview over VPN')"
 
 seed "$work" "$C3" 91ad7c60 10800 \
   "$(u "$C3" 'terraform apply keeps failing: connection refused talking to the vault sidecar')" \
-  "$(a "$C3" 'The sidecar starts after the job container. Order it with a depends_on.')"
+  "$(a "$C3" 'The sidecar starts after the job container. Order it with a depends_on.')" \
+  "$(t 'Vault sidecar start order')"
 
 seed "$personal" "$fakehome/.zsh" c08f14b2 172800 \
   "$(u "$fakehome/.zsh" 'zle widget rebinding after a connection refused in the prompt hook')"
@@ -139,7 +145,8 @@ seed_at() {
 }
 seed_at "$rhome/.claude" "$R1" a1c6f83b 2400 \
   "$(u "$R1" 'rclone mount died overnight — connection refused from the metadata endpoint')" \
-  "$(a "$R1" 'The token refresh runs at 04:00 and the mount is never retried after it.')"
+  "$(a "$R1" 'The token refresh runs at 04:00 and the mount is never retried after it.')" \
+  "$(t 'rclone mount token refresh')"
 seed_at "$rhome/.claude-media" "$R2" e5710b93 7200 \
   "$(u "$R2" 'restic check ends in connection refused halfway through the snapshot list')"
 
