@@ -85,6 +85,21 @@ mk_session() {
   esac
 }
 
+# title_session <root> <cwd> <id> <kind> <title> — append a title record to a
+# fixture session, in the shape Claude Code writes it: <kind> is `ai` (the
+# generated title, {"type":"ai-title","aiTitle":…}), `custom` (/rename,
+# {"type":"custom-title","customTitle":…}) or `summary` (the legacy record).
+# <title> goes in verbatim, so a test can hand it JSON escapes.
+title_session() {
+  local root="$1" cwd="$2" id="$3" kind="$4" title="$5"
+  local f="$root/projects/${cwd//[^a-zA-Z0-9]/-}/$id.jsonl"
+  case "$kind" in
+    ai)      printf '{"type":"ai-title","aiTitle":"%s","sessionId":"%s"}\n' "$title" "$id" >> "$f" ;;
+    custom)  printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$title" "$id" >> "$f" ;;
+    summary) printf '{"type":"summary","summary":"%s","leafUuid":"u1"}\n' "$title" >> "$f" ;;
+  esac
+}
+
 # age_session <root> <cwd> <id> <seconds-ago> — backdate a fixture session's
 # mtime by <seconds-ago> relative to $CCFIND_NOW, the clock the test froze. An
 # assertion on "5h ago" is then about the formatter, not about when the suite
