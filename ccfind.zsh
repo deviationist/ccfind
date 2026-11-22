@@ -457,7 +457,7 @@ function _ccfind_tab_shift() {
 #   ccfind -H "host-a host-b" ... search these ssh hosts (implies remote,
 #                               overrides CCFIND_HOSTS)
 #   ccfind -R <text...>         search the hosts INSTEAD of local, not as well
-#                               (`ccfind -R -H quim` → that one host alone)
+#                               (`ccfind -R -H box1` → that one host alone)
 #   ccfind <profile> <text...>  scope the LOCAL search to one CCFIND_PROFILES
 #   ccfind -p <profile> <text>  profile (e.g. `ccfind work foo`); omit it to
 #                               search every configured profile at once
@@ -542,7 +542,7 @@ function ccfind() {
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  -r/-H ADD the hosts to the local search; -R/--remote-only searches the hosts"
-        echo "  INSTEAD of local (-R -H quim = that host alone). -R and -l are exclusive"
+        echo "  INSTEAD of local (-R -H box1 = that host alone). -R and -l are exclusive"
         echo "  multi-profile (CCFIND_PROFILES): -p <label>, or a leading <label> arg, scopes to one profile"
         echo "  -C/--no-color strips the colour (as do NO_COLOR=1 and CCFIND_COLOR=never); output is"
         echo "  plain whenever stdout is not a terminal, so piping is unaffected either way"

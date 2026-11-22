@@ -49,7 +49,7 @@ ccfind [-d <dir>] [-n <max>]       # no query → just list the most recent sess
 ccfind -r <text...>                # also search the configured remote hosts (CCFIND_HOSTS)
 ccfindr <text...>                  # alias for `ccfind -r` (define in ~/.zshrc)
 ccfind -H "host-a host-b" <text...># search these ssh hosts (implies remote, overrides CCFIND_HOSTS)
-ccfind -R <text...>                # search the hosts INSTEAD of local (-R -H quim → that host alone)
+ccfind -R <text...>                # search the hosts INSTEAD of local (-R -H box1 → that host alone)
 ccfind -l <text...>                # force local only (trumps -r / -H)
 ccfind <profile> <text...>         # scope local search to one CCFIND_PROFILES profile
 ccfind -p <profile> <text...>      # same, explicit form
@@ -344,7 +344,7 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
   the local search — local is otherwise always searched — which is right when you are
   hunting a session and don't recall which machine it was on. When you do know,
   `-R`/`--remote-only` takes the same host list and drops the local half, so
-  `ccfind -R -H quim` is quim and nothing else. See **Searching one host, and only
+  `ccfind -R -H box1` is box1 and nothing else. See **Searching one host, and only
   that host** below.
 - **Failure is soft:** an unreachable host prints one
   `ccfind: remote search failed on: <host>` line to stderr and the rest still show.
@@ -359,16 +359,16 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
 `-r` and `-H` are *widening* flags: they add the hosts to the local search rather
 than replacing it, which is what you want when you're trying to find a session and
 can't remember which machine it happened on. It is not what you want once you do
-know — `ccfind -H quim foo` still walks every local profile, and `ccfind quim foo`
-searches locally for the *word* "quim" (the bare-label shorthand resolves profile
+know — `ccfind -H box1 foo` still walks every local profile, and `ccfind box1 foo`
+searches locally for the *word* "box1" (the bare-label shorthand resolves profile
 labels, never host names).
 
 `-R`/`--remote-only` is the third scope: the same host list, without the local half.
 
 ```zsh
-ccfind -R -H quim <text...>    # quim alone
-ccfind -R -H quim -n 50        # …and with no query: everything resumable on quim
-ccfind -R -H "xavi,quim" foo   # both hosts, no local (the list splits on commas too)
+ccfind -R -H box1 <text...>    # box1 alone
+ccfind -R -H box1 -n 50        # …and with no query: everything resumable on box1
+ccfind -R -H "box2,box1" foo   # both hosts, no local (the list splits on commas too)
 ccfind -R foo                  # every host in CCFIND_HOSTS, no local
 ```
 
