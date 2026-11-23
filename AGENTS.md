@@ -21,7 +21,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -j | --tsv   machine output: JSON document / raw tab-separated records
   -r           also search CCFIND_HOSTS over ssh   (alias: ccfindr = ccfind -r)
   -H "<hosts>" search an explicit ssh-alias list (implies remote)
-  -R           search the hosts INSTEAD of local (-R -H quim = that host alone)
+  -R           search the hosts INSTEAD of local (-R -H box1 = that host alone)
   -l           force local only (trumps -r / -H)
   -p <label>   scope local search to one CCFIND_PROFILES profile
   <label> ...  positional shorthand for -p (e.g. `ccfind work foo`; flags first)
@@ -39,7 +39,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 - **Which machines (`-r`/`-H` widen, `-R`/`-l` exclude):** `-r`/`-H` ADD hosts to the
   local search; the local walk is otherwise unconditional. `-R`/`--remote-only` takes
   the same host list and drops the local half — it is the only way to reach one host
-  alone (`-R -H quim`). `-R` + `-l` is an error (nothing left to search), as is `-R`
+  alone (`-R -H box1`). `-R` + `-l` is an error (nothing left to search), as is `-R`
   with no host resolved; `-p`/`<label>` under `-R` warns, since it scopes local only.
 - **Remote profiles:** the worker looks for a ccfind ON the host (`$CCFIND_REMOTE_PATH`,
   `~/ccfind/ccfind.zsh`, `~/.zsh/…`, `~/.config/…` — `command -v` can't see a shell
