@@ -30,9 +30,11 @@ function _ccfind_colors() {
     _CCF_PROF=$'\033[36m'  _CCF_HOST=$'\033[35m'   _CCF_SNIP=$'\033[2m'
     _CCF_HIT=$'\033[1;33m' _CCF_CMD=$'\033[32m'    _CCF_KEY=$'\033[1m'
     _CCF_WARN=$'\033[33m'  _CCF_ERR=$'\033[31m'   _CCF_TITLE=$'\033[1m'
+    _CCF_RUN=$'\033[1;32m' _CCF_RECENT=$'\033[1;33m'
   else
     _CCF_OFF='' _CCF_DIM='' _CCF_TS='' _CCF_PROF='' _CCF_HOST='' _CCF_SNIP=''
     _CCF_HIT='' _CCF_CMD='' _CCF_KEY='' _CCF_WARN='' _CCF_ERR='' _CCF_TITLE=''
+    _CCF_RUN='' _CCF_RECENT=''
   fi
 }
 
@@ -239,7 +241,9 @@ function _ccfind_title() {
 # session per ccfind invocation, then reused while toggling the preview).
 # Single-arg form `_ccfind_preview <file>` is accepted and treated as local.
 function _ccfind_preview() {
-  local host="$1" f="$2"
+  # <host> <transcript> [<where it is running>] — the third is the picker's
+  # field 12, empty unless the session was running when the search ran.
+  local host="$1" f="$2" running="${3:-}"
   if [[ -z "$f" ]]; then f="$host"; host="local"; fi
   local label="$f"
   # Local if the host tag is "local" or one of the configured profile labels
@@ -262,12 +266,16 @@ function _ccfind_preview() {
   # colour off exactly where it is wanted). NO_COLOR is still honoured, here and
   # in the python below.
   if [[ -n "${NO_COLOR:-}" ]]; then
-    printf '%s\n\n' "$label"
+    printf '%s\n' "$label"
+    [[ -n "$running" ]] && printf '● %s\n' "$running"
   elif [[ "$label" == *:* && "$label" != "$f" ]]; then
-    printf '\033[35m%s\033[0m\033[2m:\033[0m\033[1m%s\033[0m\n\n' "${label%%:*}" "${label#*:}"
+    printf '\033[35m%s\033[0m\033[2m:\033[0m\033[1m%s\033[0m\n' "${label%%:*}" "${label#*:}"
+    [[ -n "$running" ]] && printf '\033[1;32m● %s\033[0m\n' "$running"
   else
-    printf '\033[1m%s\033[0m\n\n' "$label"
+    printf '\033[1m%s\033[0m\n' "$label"
+    [[ -n "$running" ]] && printf '\033[1;32m● %s\033[0m\n' "$running"
   fi
+  printf '\n'
   if ! command -v python3 >/dev/null 2>&1; then
     tail -n 40 -- "$f" 2>/dev/null
     return 0
@@ -517,10 +525,15 @@ function ccfind() {
   # resuming section). --cfgdir/--cwd/--as/--from-tmux are what a machine that
   # found the session hands the machine it lives on; a person needs none of them.
   local resume_id="" resume_cfgdir="" resume_cwd="" resume_as="" from_tmux=0 resume_force=0
+  local running_only=0
+  # A real tab for building run_info keys: zsh does NOT expand $'\t' inside an
+  # associative-array subscript, so a key spelled with it would hold the six
+  # characters $'\t' instead (it still "works" until anything splits the key).
+  local _T=$'\t'
   # Every colour slot _ccfind_colors fills. Declared local here (it assigns into
   # its caller's scope) so no SGR variable ever leaks into the interactive shell.
   local _CCF_OFF _CCF_DIM _CCF_TS _CCF_PROF _CCF_HOST _CCF_SNIP _CCF_HIT \
-        _CCF_CMD _CCF_KEY _CCF_WARN _CCF_ERR _CCF_TITLE
+        _CCF_CMD _CCF_KEY _CCF_WARN _CCF_ERR _CCF_TITLE _CCF_RUN _CCF_RECENT
   # The fields a parsed row unpacks into, and the search scope — declared here
   # because the parser and the emitter below close over them and are defined
   # (and called) before the code that fills them in.
@@ -550,6 +563,7 @@ function ccfind() {
       --as) resume_as="$2"; shift 2 ;;
       --from-tmux) from_tmux=1; shift ;;
       -f|--force) resume_force=1; shift ;;
+      --running) running_only=1; shift ;;
       # Asked by another machine before it hands this one a --resume: a ccfind
       # too old to know the option rejects this one too, exits non-zero, and the
       # caller falls back to the resume command it always used.
@@ -561,6 +575,7 @@ function ccfind() {
       -h|--help)
         echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-t|-T] [-r|-R|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
         echo "       ccfind [-H <host>] [-t|-T] [-f] --resume <session-id>"
+        echo "       ccfind --running [-r|-H <hosts>] [text...]"
         echo "  -d <dir> scopes to that dir AND everything below it; -x/--exact narrows to"
         echo "  that one dir only (no subdirectories), and defaults the dir to \$PWD"
         echo "  matching is case-insensitive by default: -s/--case-sensitive forces case to"
@@ -571,6 +586,8 @@ function ccfind() {
         echo "  --resume <id> resumes that session without searching (-H <host> --resume <id>"
         echo "  asks that host). A session that is already running is never started twice:"
         echo "  ccfind offers to attach to its tmux pane, or refuses; -f/--force starts it anyway"
+        echo "  markers: green ● = running right now, yellow ● (○ without colour) = active in the"
+        echo "  last CCFIND_RECENT minutes (default 15; 0 = off). --running lists only running sessions"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  -r/-H ADD the hosts to the local search; -R/--remote-only searches the hosts"
@@ -597,11 +614,11 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}" _cfg_tmux="${CCFIND_TMUX-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" || -z "$_cfg_tmux" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}" _cfg_tmux="${CCFIND_TMUX-}" _cfg_recent="${CCFIND_RECENT-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" || -z "$_cfg_tmux" || -z "$_cfg_recent" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE="" CCFIND_TMUX=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE="" CCFIND_TMUX="" CCFIND_RECENT=""
       source "$_envf"
       [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
       [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
@@ -612,6 +629,7 @@ function ccfind() {
       [[ -z "$_cfg_time" ]]          && _cfg_time="$CCFIND_TIME"
       [[ -z "$_cfg_case" ]]          && _cfg_case="$CCFIND_CASE"
       [[ -z "$_cfg_tmux" ]]          && _cfg_tmux="$CCFIND_TMUX"
+      [[ -z "$_cfg_recent" ]]        && _cfg_recent="$CCFIND_RECENT"
     fi
   fi
 
@@ -655,8 +673,16 @@ function ccfind() {
   fi
   # One clock reading for the whole run, so every age on screen is measured
   # from the same instant and a long listing cannot straddle a minute boundary.
+  # ---- Recent activity: a hit whose transcript changed within the last
+  # CCFIND_RECENT minutes (default 15) gets the yellow marker, unless it is
+  # running (green wins). 0 turns it off; a typo falls back to 15, and says so.
+  local -i recent_secs=900
+  if [[ -n "$_cfg_recent" ]]; then
+    if [[ "$_cfg_recent" == <-> ]]; then recent_secs=$(( _cfg_recent * 60 ))
+    else print -u2 -r -- "${_CCF_WARN}ccfind: CCFIND_RECENT=${_cfg_recent} is not a number of minutes — using 15${_CCF_OFF}"; fi
+  fi
   local _now=""
-  [[ "$_time_mode" == abs ]] || _now="$(_ccfind_now)"
+  [[ "$_time_mode" == abs ]] && (( ! recent_secs )) || _now="$(_ccfind_now)"
 
   # _ccfind_rel_token <epoch> — the row's age as it will be shown, plain: empty
   # in abs mode, bare ("5h ago") when it stands alone, parenthesised when it
@@ -780,6 +806,15 @@ function ccfind() {
         _ccfind_rec2row "$_r"; _ccfind_parse_row "$_row"
         print -r -- "$_epoch"$'\t'"$_profile"$'\t'"$_cfgdir"$'\t'"$_id"$'\t'"$_cwd"$'\t'"$_ts"$'\t'"$_snippet"$'\t'"$_path"$'\t'"$_title"
       done
+      # What runs here now, for the caller's markers — only when it asked
+      # (CCFIND_STATUS=1, set by the remote worker), so a caller that predates
+      # these lines never receives one to misread as a record.
+      if [[ "${CCFIND_STATUS:-}" == 1 ]]; then
+        local _k
+        for _k in "${(@k)run_info}"; do
+          [[ "$_k" == local$'\t'* ]] && print -r -- "#running"$'\t'"${_k#local$'\t'}"$'\t'"${run_info[$_k]}"
+        done
+      fi
       return 0
     fi
     print -r -- '{'
@@ -811,6 +846,20 @@ function ccfind() {
       print -rn -- ', "mtime": ';                          _ccfind_json_str "$_ts"
       print -rn -- ', "snippet": ';                        _ccfind_json_str "$_snippet"
       print -rn -- ', "path": ';                           _ccfind_json_str "$_path"
+      # Running right now, as seen when the search ran: null, or where.
+      local _rv="${run_info[$_host$_T$_id]-}"
+      if [[ -n "$_rv" ]]; then
+        local -a _rx=("${(@ps:\t:)_rv}")
+        print -rn -- ', "running": {"in_tmux": '"$( [[ "${_rx[1]}" == tmux ]] && print -n true || print -n false )"
+        print -rn -- ', "pid": '"${_rx[2]:-null}"', "terminal": ';  _ccfind_json_str "${_rx[3]}"
+        print -rn -- ', "tmux_server": ';                       _ccfind_json_str "${_rx[4]}"
+        print -rn -- ', "tmux_session": ';                      _ccfind_json_str "${_rx[5]}"
+        print -rn -- ', "tmux_window": ';                       _ccfind_json_str "${_rx[6]}"
+        print -rn -- ', "tmux_pane": ';                         _ccfind_json_str "${_rx[7]}"
+        print -rn -- '}'
+      else
+        print -rn -- ', "running": null'
+      fi
       print -rn -- '}'
     done
     (( _first )) || print
@@ -1055,67 +1104,170 @@ function ccfind() {
     print -rn -- "${(j: :)_w}"
   }
 
+  # _ccfind_record <record file> [<id>] → true when that record describes a
+  # session running on this machine now (and is that id's, when one is given),
+  # with _run_id/_run_pid/_run_tty set. The record is trusted only as far as
+  # the process behind it checks out (see above).
+  local _run_id _mydom=""
+  _ccfind_record() {
+    _run_id="" _run_pid="" _run_tty=""
+    local _j _p _ps _dom
+    [[ -z "$_mydom" ]] && _mydom="$(_ccfind_proc_domain)"
+    _j="$(<"$1")" 2>/dev/null || return 1
+    if [[ -n "${2:-}" ]]; then
+      [[ "$2" =~ '^[A-Za-z0-9_-]+$' ]] || return 1  # an id is safe to put in a regex
+      [[ "$_j" =~ '"sessionId"[[:space:]]*:[[:space:]]*"'"$2"'"' ]] || return 1
+      _run_id="$2"
+    else
+      [[ "$_j" =~ '"sessionId"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_-]+)"' ]] || return 1
+      _run_id="${match[1]}"
+    fi
+    _p="${1:t:r}"
+    [[ "$_j" =~ '"pid"[[:space:]]*:[[:space:]]*([0-9]+)' ]] && _p="${match[1]}"
+    [[ "$_p" == <-> ]] || return 1
+    _ps="" _dom=""
+    [[ "$_j" =~ '"procStart"[[:space:]]*:[[:space:]]*"?([^",}]*)' ]] && _ps="${match[1]}"
+    [[ "$_j" =~ '"pidDomain"[[:space:]]*:[[:space:]]*"([^"]*)"' ]] && _dom="${match[1]}"
+    [[ -n "$_dom" && -n "$_mydom" && "$_dom" != "$_mydom" ]] && return 1   # another machine's pid
+    kill -0 "$_p" 2>/dev/null || return 1                                    # gone; the record outlived it
+    if [[ -n "$_ps" ]]; then                                                 # reused pid
+      [[ "$(_ccfind_norm_start "$(_ccfind_proc_start "$_p")")" == "$(_ccfind_norm_start "$_ps")" ]] || return 1
+    fi
+    _run_pid="$_p"
+    _run_tty="${$(ps -o tty= -p "$_p" 2>/dev/null)//[[:space:]]/}"
+    [[ "$_run_tty" == (\?|\?\?|) ]] && _run_tty=""
+    return 0
+  }
+
   # _ccfind_running <cfgdir> <id> → true when that session is running on this
   # machine now, with _run_pid/_run_tty set, and _run_sock/_run_tsess/
   # _run_twin/_run_tpane too when it runs in a tmux pane.
   _ccfind_running() {
-    _run_pid="" _run_tty="" _run_sock="" _run_tsess="" _run_twin="" _run_tpane=""
-    [[ "$2" =~ '^[A-Za-z0-9_-]+$' ]] || return 1    # an id is safe to put in a regex
-    local _f _j _p _ps _dom _mydom="$(_ccfind_proc_domain)"
+    _run_sock="" _run_tsess="" _run_twin="" _run_tpane=""
+    local _f
     for _f in "$1"/sessions/*.json(N); do
-      _j="$(<"$_f")" 2>/dev/null || continue
-      [[ "$_j" =~ '"sessionId"[[:space:]]*:[[:space:]]*"'"$2"'"' ]] || continue
-      _p="${_f:t:r}"
-      [[ "$_j" =~ '"pid"[[:space:]]*:[[:space:]]*([0-9]+)' ]] && _p="${match[1]}"
-      [[ "$_p" == <-> ]] || continue
-      _ps="" _dom=""
-      [[ "$_j" =~ '"procStart"[[:space:]]*:[[:space:]]*"?([^",}]*)' ]] && _ps="${match[1]}"
-      [[ "$_j" =~ '"pidDomain"[[:space:]]*:[[:space:]]*"([^"]*)"' ]] && _dom="${match[1]}"
-      [[ -n "$_dom" && -n "$_mydom" && "$_dom" != "$_mydom" ]] && continue   # another machine's pid
-      kill -0 "$_p" 2>/dev/null || continue                                    # gone; the record outlived it
-      if [[ -n "$_ps" ]]; then                                                 # reused pid
-        [[ "$(_ccfind_norm_start "$(_ccfind_proc_start "$_p")")" == "$(_ccfind_norm_start "$_ps")" ]] || continue
-      fi
-      _run_pid="$_p"
-      _run_tty="${$(ps -o tty= -p "$_p" 2>/dev/null)//[[:space:]]/}"
-      [[ "$_run_tty" == (\?|\?\?|) ]] && _run_tty=""
-      _ccfind_find_pane "$_p"
+      _ccfind_record "$_f" "$2" || continue
+      _ccfind_find_pane "$_run_pid"
       return 0
     done
     return 1
   }
 
-  # _ccfind_find_pane <pid> → true, with _run_sock/_run_tsess/_run_twin/
-  # _run_tpane, when that process runs inside a tmux pane on this machine.
-  # A pane's pid is the process tmux started in it, so the claude process or
-  # one of its ancestors is a pane pid. Every tmux server the user owns is
-  # asked, not only the default one: a server started with -L <name> (the
-  # homelab's claude-rc service is one) has its own socket beside `default`.
-  # A socket whose server is gone answers nothing and is skipped. No tmux
-  # installed → nothing to find.
-  _ccfind_find_pane() {
-    command -v tmux >/dev/null 2>&1 || return 1
-    local -a _anc _socks; local -A _seen; local _q="$1" _i _s _line _pp
-    for _i in {1..16}; do
-      _anc+=("$_q")
-      _q="${$(ps -o ppid= -p "$_q" 2>/dev/null)//[[:space:]]/}"
-      [[ -z "$_q" || "$_q" == 0 || "$_q" == 1 ]] && break
-    done
+  # _ccfind_pane_table → _panes, one "socket<TAB>pane pid<TAB>session<TAB>
+  # window<TAB>pane" line per tmux pane on this machine, read once per run.
+  # Every tmux server the user owns is asked, not only the default one: a
+  # server started with -L <name> (the homelab's claude-rc service is one) has
+  # its own socket beside `default`. A socket whose server is gone answers
+  # nothing and is skipped. No tmux installed → no panes.
+  local -a _panes; local _panes_read=0
+  _ccfind_pane_table() {
+    (( _panes_read )) && return 0
+    _panes_read=1; _panes=()
+    command -v tmux >/dev/null 2>&1 || return 0
+    local -a _socks; local -A _seen; local _s _line
     _socks=("${TMUX_TMPDIR:-/tmp}/tmux-$UID"/*(N))
     [[ -n "${TMUX:-}" ]] && _socks=("${TMUX%%,*}" "${_socks[@]}")
     for _s in "${_socks[@]}"; do
       [[ -n "${_seen[${_s:A}]+x}" ]] && continue
       _seen[${_s:A}]=1
       for _line in ${(f)"$(tmux -S "$_s" list-panes -a -F "#{pane_pid}"$'\t'"#{session_name}"$'\t'"#{window_index}"$'\t'"#{pane_index}" 2>/dev/null)"}; do
-        _pp="${_line%%$'\t'*}"
-        (( ${_anc[(Ie)$_pp]} )) || continue
-        _run_sock="$_s"; _line="${_line#*$'\t'}"
-        _run_tsess="${_line%%$'\t'*}"; _line="${_line#*$'\t'}"
-        _run_twin="${_line%%$'\t'*}"; _run_tpane="${_line#*$'\t'}"
-        return 0
+        [[ -n "$_line" ]] && _panes+=("$_s"$'\t'"$_line")
       done
     done
+  }
+
+  # _ccfind_find_pane <pid> → true, with _run_sock/_run_tsess/_run_twin/
+  # _run_tpane, when that process runs inside a tmux pane on this machine.
+  # A pane's pid is the process tmux started in it, so the claude process or
+  # one of its ancestors is a pane pid.
+  _ccfind_find_pane() {
+    _run_sock="" _run_tsess="" _run_twin="" _run_tpane=""
+    _ccfind_pane_table
+    (( ${#_panes} )) || return 1
+    local -a _anc; local _q="$1" _i _e _rest
+    for _i in {1..16}; do
+      _anc+=("$_q")
+      _q="${$(ps -o ppid= -p "$_q" 2>/dev/null)//[[:space:]]/}"
+      [[ -z "$_q" || "$_q" == 0 || "$_q" == 1 ]] && break
+    done
+    for _e in "${_panes[@]}"; do
+      _rest="${_e#*$'\t'}"
+      (( ${_anc[(Ie)${_rest%%$'\t'*}]} )) || continue
+      _run_sock="${_e%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+      _run_tsess="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+      _run_twin="${_rest%%$'\t'*}"; _run_tpane="${_rest#*$'\t'}"
+      return 0
+    done
     return 1
+  }
+
+  # ---- what is running, for the markers ------------------------------------
+  # run_info["<host><TAB><id>"] → "<tmux|term><TAB>pid<TAB>tty<TAB>socket
+  # flag<TAB>tmux session<TAB>window<TAB>pane" for every session running right
+  # now: this machine's from _ccfind_scan_running, a remote host's from the
+  # `#running` lines its own ccfind sends back. A snapshot for display only;
+  # resuming re-checks.
+  local -A run_info
+  _ccfind_scan_running() {   # every running session in every local profile
+    local _d _f
+    local -A _done
+    for _d in "${(@v)prof_cfgdir}"; do
+      [[ -n "${_done[$_d]+x}" ]] && continue
+      _done[$_d]=1
+      for _f in "$_d"/sessions/*.json(N); do
+        _ccfind_record "$_f" || continue
+        [[ -n "${run_info[local$_T$_run_id]+x}" ]] && continue
+        local _st=term _sf=""
+        if _ccfind_find_pane "$_run_pid"; then
+          _st=tmux; _ccfind_tmux_sockflag "$_run_sock"; _sf="$_sflag"
+        fi
+        run_info[local$_T$_run_id]="$_st"$'\t'"$_run_pid"$'\t'"$_run_tty"$'\t'"$_sf"$'\t'"$_run_tsess"$'\t'"$_run_twin"$'\t'"$_run_tpane"
+      done
+    done
+  }
+
+  # _ccfind_run_text <host> <id> → $_rtext, where a running session is, in
+  # words ("" when it is not running); $_racmd, the command that reaches it
+  # ("" when nothing can: it runs outside tmux).
+  local _rtext _racmd
+  _ccfind_run_text() {
+    _rtext="" _racmd=""
+    local _v="${run_info[$1$_T$2]-}"
+    [[ -n "$_v" ]] || return 1
+    local -a _x=("${(@ps:\t:)_v}")
+    local _on="" _ssh=""
+    [[ "$1" != local ]] && { _on=" on $1"; _ssh="ssh -t ${(q)1} "; }
+    if [[ "${_x[1]}" == tmux ]]; then
+      _rtext="running in tmux session '${_x[5]}' (window ${_x[6]}, pane ${_x[7]})${_on}"
+      _racmd="${_ssh}tmux${_x[4]:+ ${_x[4]}} attach -t ${(qq):-=${_x[5]}}"
+      # Inside that very tmux server, attaching is refused (it would nest);
+      # switching this client to it is the move.
+      if [[ "$1" == local && -n "${TMUX:-}" ]]; then
+        local _sp="${TMUX_TMPDIR:-/tmp}/tmux-$UID/default"
+        case "${_x[4]}" in
+          -L\ *) _sp="${TMUX_TMPDIR:-/tmp}/tmux-$UID/${(Q)${_x[4]#-L }}" ;;
+          -S\ *) _sp="${(Q)${_x[4]#-S }}" ;;
+        esac
+        [[ "${${TMUX%%,*}:A}" == "${_sp:A}" ]] && _racmd="tmux switch-client -t ${(qq):-=${_x[5]}}"
+      fi
+    else
+      _rtext="running${_on} (pid ${_x[2]}${_x[3]:+, terminal ${_x[3]}}${_x[3]:-, no terminal}), outside tmux"
+    fi
+  }
+
+  # _ccfind_mark → $_mk, the marker for the row just parsed: green ● when it
+  # is running now, yellow ● when its transcript changed within the last
+  # CCFIND_RECENT minutes (running wins), "" otherwise. Without colour the two
+  # would look the same, so recent becomes a hollow ○ there.
+  local _mk
+  _ccfind_mark() {
+    _mk=""
+    if [[ -n "${run_info[$_host$_T$_id]+x}" ]]; then
+      _mk="${_CCF_RUN}●${_CCF_OFF}"
+    elif (( recent_secs )) && [[ "$_epoch" == <-> && "$_now" == <-> ]] \
+         && (( _now - _epoch < recent_secs )); then
+      if [[ -n "$_CCF_RECENT" ]]; then _mk="${_CCF_RECENT}●${_CCF_OFF}"; else _mk="○"; fi
+    fi
   }
 
   # How a person names that tmux server on a command line: nothing for the
@@ -1333,11 +1485,16 @@ function ccfind() {
 #       empty)  $4=the -d path as typed (may be empty)  $5=1 for -x
 #       $6=1 for a case-sensitive match, 0 to fold (already resolved by the
 #       caller, so `smart` is decided once for the whole fan-out)
+#       $7=1 for --running (only sessions running there now)
 #
 # Emits one header line, then records:
 #   #ccfind mode=<remote|fallback> [reason=<why>]
 #   epoch<TAB>profile<TAB>cfgdir<TAB>id<TAB>cwd<TAB>mtime<TAB>snippet<TAB>path<TAB>title
 # newest first. The caller prefixes the host it dialled; it never appears here.
+# A host with its own ccfind also reports what runs there right now, one line
+# per session, after the records (asked for with CCFIND_STATUS=1, which an
+# older ccfind ignores, so it simply sends none):
+#   #running<TAB>id<TAB>tmux|term<TAB>pid<TAB>tty<TAB>socket flag<TAB>tmux session<TAB>window<TAB>pane
 #
 # Two ways to produce those records, tried in that order, in ONE connection —
 # a separate capability probe would double the ssh cost of every host in a
@@ -1357,7 +1514,7 @@ function ccfind() {
 # `zsh -f` skips the rc entirely (fast, and no surprises from someone's
 # prompt), and sourcing the file still auto-loads the .env beside it — which
 # is where that host's CCFIND_PROFILES lives.
-q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"; csens="$6"
+q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"; csens="$6"; running="${7:-0}"
 root="$HOME/.claude/projects"
 # grep's fold flag, as a word that is empty when unwanted — this is POSIX sh,
 # so there are no arrays; the unquoted expansions below are deliberate.
@@ -1370,7 +1527,7 @@ if [ "$csens" = 1 ]; then gi=""; cmode=sensitive; else gi="-i"; cmode=insensitiv
 # searching the CALLER's profile directories under its own name.
 unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
       CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD \
-      CCFIND_CASE CCFIND_TMUX
+      CCFIND_CASE CCFIND_TMUX CCFIND_STATUS CCFIND_RECENT
 
 # Try EVERY candidate, not just the first one that exists. A host can easily
 # carry more than one clone — one left where the tool used to live, one where it
@@ -1409,7 +1566,11 @@ if command -v zsh >/dev/null 2>&1; then
     # return insensitive hits under a sensitive search, which is the one failure
     # mode worth a fallback.
     [ "$csens" = 1 ] && set -- "$@" -s
-    out=$(CCFIND_CASE="$cmode" zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
+    # --running is asked of the host itself, so it narrows BEFORE its cap. A
+    # ccfind predating it rejects it and the host drops to the walk below,
+    # whose hits carry no running status and so are filtered out by the caller.
+    [ "$running" = 1 ] && set -- "$@" --running
+    out=$(CCFIND_CASE="$cmode" CCFIND_STATUS=1 zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
     # Exit status alone decides, NOT whether anything came back: a search that
     # legitimately matched nothing is a successful remote search, and testing
     # for output would demote it to a fallback — a pointless second walk of the
@@ -1478,7 +1639,7 @@ RSEOF
     for h in "${remote_hosts[@]}"; do
       (
         command ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$h" \
-          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact} ${(q)csens}" \
+          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact} ${(q)csens} ${(q)running_only}" \
           <<<"$_rscript" >"$rtmpdir/${h//\//_}.tsv" 2>/dev/null
         echo $? >"$rtmpdir/${h//\//_}.rc"
       ) &
@@ -1536,6 +1697,11 @@ RSEOF
   # tab labels, the positional <label> parse and the preview all read it, and
   # only the scan is skipped.
   (( remote_only && verbose )) && print -u2 -r -- "${_CCF_DIM}ccfind: local not searched (-R) — hosts only: ${(j:, :)remote_hosts}${_CCF_OFF}"
+  # What runs here now, for the markers. Before the walk, because --running
+  # narrows each profile to its running sessions BEFORE the per-profile cap:
+  # a long-idle session that is still running must not be capped away by
+  # newer ones that are not.
+  (( remote_only )) || _ccfind_scan_running
   for (( _pi = 1; _pi <= ${#prof_labels} && ! remote_only; _pi++ )); do
     _plabel="${prof_labels[$_pi]}"
     _proot="${prof_roots[$_pi]}"
@@ -1570,6 +1736,13 @@ RSEOF
     # newest first; ls -t with an explicit list works on GNU and BSD alike
     pfiles=("${(@f)$(ls -t -- $phits 2>/dev/null)}")
     pfiles=(${pfiles:#})
+    if (( running_only )); then                  # a transcript is <session-id>.jsonl
+      local -a _keep=()
+      for _f in "${pfiles[@]}"; do
+        [[ -n "${run_info[local$_T${_f:t:r}]+x}" ]] && _keep+=("$_f")
+      done
+      pfiles=("${_keep[@]}")
+    fi
     (( local_count += ${#pfiles} ))
     for _f in "${pfiles[@]:0:$max}"; do
       _ccfind_extract "$_f"
@@ -1604,7 +1777,7 @@ RSEOF
     (( _busy )) && printf '\033[2K\r' >&2
     local -a _rfailed
     local -A _rmode _rreason
-    local line _hrc _ltabs
+    local line _hrc _ltabs _rr _rid
     for h in "${remote_hosts[@]}"; do
       _hrc="$(cat -- "$rtmpdir/${h//\//_}.rc" 2>/dev/null)"
       if [[ "$_hrc" != "0" ]]; then
@@ -1620,6 +1793,14 @@ RSEOF
           [[ "$line" == *reason=* ]] && _rreason[$h]="${line#*reason=}"
           continue
         fi
+        # A session running on that host, as its own ccfind saw it (sent only
+        # because we asked: see CCFIND_STATUS in the worker).
+        if [[ "$line" == '#running'$'\t'* ]]; then
+          _rr="${line#*$'\t'}"
+          _rid="${_rr%%$'\t'*}"
+          run_info[$h$_T$_rid]="${_rr#*$'\t'}"
+          continue
+        fi
         # A host whose ccfind predates titles sends 8 fields; pad it to the 9
         # every record here carries, or its path would be read as the title.
         _ltabs="${line//[^$'\t']/}"
@@ -1628,6 +1809,18 @@ RSEOF
         (( remote_count++ ))
       done <"$rtmpdir/${h//\//_}.tsv"
     done
+    # --running: the hosts' own ccfind narrowed already; a host that could not
+    # (no ccfind, or one that predates --running) sent hits it knows nothing
+    # about, and nothing unknown can be shown as running.
+    if (( running_only )); then
+      local -a _rkeep=(); local -a _rf
+      for line in "${records[@]}"; do
+        _rf=("${(@ps:\t:)line}")
+        [[ "${_rf[2]}" == local || -n "${run_info[${_rf[2]}$_T${_rf[5]}]+x}" ]] && _rkeep+=("$line")
+      done
+      (( remote_count -= ${#records} - ${#_rkeep} ))
+      records=("${_rkeep[@]}")
+    fi
     (( ${#_rfailed} > 0 )) && print -u2 -r -- "${_CCF_WARN}ccfind: remote search failed on:${_CCF_OFF} ${_rfailed[*]}"
     # A host without ccfind is searched anyway, just under its default profile
     # only — which is a quiet half-answer, not an error, so it is reported at
@@ -1653,6 +1846,7 @@ RSEOF
     # Only when it is ON: an insensitive search is the default, and naming it
     # here would pad every empty result with a line that rules nothing out.
     (( csens )) && _what+=("case-sensitive")
+    (( running_only )) && _what+=("running sessions only")
     (( profiles_on && ! remote_only )) && _what+=("profiles: ${(j:, :)prof_labels}")
     (( remote_only )) && _what+=("hosts only (-R), local not searched")
     (( ${#remote_hosts} > 0 )) && _what+=("hosts: ${(j:, :)remote_hosts}")
@@ -1732,6 +1926,13 @@ RSEOF
     # of its own — sized to the rows, absent when none of them has a title (no
     # blank gutter on a host whose Claude predates titles).
     (( w_title > 48 )) && w_title=48
+    # The marker column (● running / recent): present when any row, in any tab
+    # view, has a marker, so switching views never shifts the columns.
+    local _mkcol=0
+    for _r in "${rows_all[@]}"; do
+      _ccfind_parse_row "$_r"; _ccfind_mark
+      [[ -n "$_mk" ]] && { _mkcol=1; break; }
+    done
 
     local _crow _dhost
     _ccfind_disp_row() {   # <raw row> → the row plus a last field, its rendered line
@@ -1758,9 +1959,14 @@ RSEOF
         (( ${#_tt} > w_title )) && _tt="${_tt[1,w_title-1]}…"
         _dt="${_CCF_TITLE}$(_ccfind_hl "${(r:$w_title:)_tt}" "$query" "$_CCF_TITLE" "$csens")${_CCF_OFF}  "
       fi
+      local _dm=""
+      if (( _mkcol )); then _ccfind_mark; _dm="${_mk:- } "; fi
+      # Field 12, after the display field: where it is running, in words, for
+      # the preview header ({12}). Empty when it is not running.
+      _ccfind_run_text "$_host" "$_id"
       # Pad on the plain text, colour after: an SGR run counts toward a string's
       # length but draws nothing, so padding a coloured field skews the column.
-      print -rn -- "$1"$'\t'"${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_dt}${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP" "$csens")${_CCF_OFF}"
+      print -rn -- "$1"$'\t'"${_dm}${_tcell}  ${_dhost}${(r:$w_cwd:)_dcwd}  ${_dt}${_CCF_SNIP}$(_ccfind_hl "$_sn" "$query" "$_CCF_SNIP" "$csens")${_CCF_OFF}"$'\t'"${_rtext}"
     }
 
     # Field 11 is the composed display line (built below); 1-10 are the data
@@ -1834,7 +2040,7 @@ RSEOF
             --delimiter=$'\t' --with-nth=$withnth \
             --no-sort --ansi --reverse --height=80% \
             --header="$header" \
-            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}} CCFIND_PV_QUERY=${(q)query} CCFIND_PV_CASE=${(q)csens}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {8}'" \
+            --preview "zsh -c 'export CCFIND_PV_CACHE=${(q)pvcache} CCFIND_LOCAL_LABELS=${(q)${(j: :)prof_labels}} CCFIND_PV_QUERY=${(q)query} CCFIND_PV_CASE=${(q)csens}; source ${(q)_CCFIND_SOURCE}; _ccfind_preview {1} {8} {12}'" \
             --preview-window='hidden,right,60%,wrap' \
             --bind 'right:show-preview' \
             --bind 'left:hide-preview' \
@@ -1862,8 +2068,14 @@ RSEOF
   # resume command — now with the label colour carrying local-vs-remote and the
   # match lit inside the snippet. Every SGR here is empty when colour is off, so
   # a piped run emits exactly the bytes it always did.
-  local resume shown=0 _tag
+  local resume shown=0 _tag _lm=""
   _ccfind_rel_width "${rows[@]}"
+  # The marker column, as in the picker: present when any row has a marker.
+  local _mkcol=0
+  for _r in "${rows[@]}"; do
+    _ccfind_parse_row "$_r"; _ccfind_mark
+    [[ -n "$_mk" ]] && { _mkcol=1; break; }
+  done
   for _r in "${rows[@]}"; do
     (( shown > 0 )) && printf '%s%s%s\n' "$_CCF_DIM" '──────────────────────────────────────────' "$_CCF_OFF"
     _ccfind_parse_row "$_r"
@@ -1895,12 +2107,27 @@ RSEOF
     # Display-only contraction, as in the picker; the resume line printed two
     # lines down still carries the path in full.
     _ccfind_time_cell $w_rel "$_CCF_TS"
-    printf '%s  %s%s\n' "$_tcell" "$_tag" "${${_cwd:-?}/#$HOME/~}"
+    _lm=""
+    if (( _mkcol )); then _ccfind_mark; _lm="${_mk:- } "; fi
+    printf '%s%s  %s%s\n' "$_lm" "$_tcell" "$_tag" "${${_cwd:-?}/#$HOME/~}"
     [[ -n "$_title" ]] && \
       printf '   %s%s%s\n' "$_CCF_TITLE" "$(_ccfind_hl "$_title" "$query" "$_CCF_TITLE" "$csens")" "$_CCF_OFF"
     [[ -n "$_snippet" ]] && \
       printf '   %s…%s…%s\n' "$_CCF_SNIP" "$(_ccfind_hl "$_snippet" "$query" "$_CCF_SNIP" "$csens")" "$_CCF_OFF"
-    printf '   %s%s%s\n' "$_CCF_CMD" "$resume" "$_CCF_OFF"
+    # Running right now: say where, and print what reaches it instead of a
+    # resume line, which would start a second claude on it.
+    if _ccfind_run_text "$_host" "$_id"; then
+      printf '   %s● %s%s\n' "$_CCF_RUN" "$_rtext" "$_CCF_OFF"
+      if [[ -n "$_racmd" ]]; then
+        printf '   %s%s%s\n' "$_CCF_CMD" "$_racmd" "$_CCF_OFF"
+      else
+        local _fh=""; _ccfind_is_local "$_host" || _fh="-H ${(q)_host} "
+        printf '   %s(finish it there; ccfind %s-f --resume %s starts a second one)%s\n' \
+          "$_CCF_DIM" "$_fh" "$_id" "$_CCF_OFF"
+      fi
+    else
+      printf '   %s%s%s\n' "$_CCF_CMD" "$resume" "$_CCF_OFF"
+    fi
     (( shown++ ))
   done
   (( truncated )) && printf '%s… (%s total; raise with -n <max> or $CCFIND_MAX)%s\n' \

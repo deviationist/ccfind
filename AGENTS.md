@@ -17,6 +17,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -t | -T      resume inside tmux / in this terminal (= CCFIND_TMUX)
   --resume <id>  resume that session, no search (checks it is not running)
   -f           with --resume / Enter: start it even though it is running
+  --running    only sessions running right now (green ●), on every searched host
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
@@ -60,9 +61,22 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   the single newest-first list and share the `-n` budget, so sessions from the dir
   itself can be crowded out by busier sub-dirs — that is what `-x` is for.
 - **Machine output:** `--json` (envelope: version/query/case_sensitive/case_mode/scope/scope_exact/total/shown/truncated/
-  results[]) and `--tsv` (the wire record, host column dropped — the caller knows the
-  alias it dialled). Both imply no picker and no colour, and stay well-formed with
-  zero results: a sentence where a document belongs would be parsed as a record.
+  results[]; each result has `running`: null or where) and `--tsv` (the wire record,
+  host column dropped — the caller knows the alias it dialled). Both imply no picker
+  and no colour, and stay well-formed with zero results: a sentence where a document
+  belongs would be parsed as a record. With `CCFIND_STATUS=1` in its env (set by the
+  remote worker only), `--tsv` also sends `#running<TAB>id<TAB>tmux|term<TAB>pid<TAB>
+  tty<TAB>sockflag<TAB>session<TAB>window<TAB>pane` lines after the records; a caller
+  that predates them never asks, so never receives one.
+- **Markers:** green ● = running now (`run_info["host<TAB>id"]`, from
+  `_ccfind_scan_running` here and `#running` lines from hosts; same record checks as
+  `--resume`), yellow ● = transcript mtime within `CCFIND_RECENT` minutes (default
+  15, `0` off), running wins; without colour recent is `○`. Flat list: a running hit
+  gets a status line and the attach/switch command INSTEAD of a resume line (none
+  when it runs outside tmux). Picker: field 12 = where it runs, for the preview
+  header (`{12}`). `--running` narrows each local profile BEFORE its `-n` cap, is
+  passed to hosts (worker arg 7) so they narrow before theirs, and drops remote hits
+  with no status (fallback hosts).
 - **Multi-profile — two sources, checked in order:** `CCFIND_PROFILES="label:dir …"`
   (env or `.env`), else **claude-profile** (`claude-profile list`, its stable
   `name<TAB>dir[<TAB>active]` porcelain; found as command/function, else
@@ -158,6 +172,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_REMOTE_RESUME` | unset | override remote resume: called `<cmd> <host> <cwd> <id>` (wrap in tmux/screen) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
 | `CCFIND_TMUX` | 0 | `1` → sessions living on THIS machine resume inside tmux by default (`-t`/`-T` override; never nested; tmux optional) |
+| `CCFIND_RECENT` | 15 | minutes a hit counts as recently active (yellow ●); `0` = off |
 | `CCFIND_CASE` | insensitive | case matching: `insensitive` / `sensitive` / `smart` (`-s`/`-I`/`-S` override) |
 | `CCFIND_TIME` | both | time column: `both` (mtime + age) / `abs` (mtime) / `rel` (age) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
@@ -171,12 +186,17 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 - `.env` is sourced inside function scope with the keys pre-`typeset`ed local, so it
   never leaks into the interactive shell.
 - Portable across macOS (BSD `stat`) and Linux (GNU `stat`); no bashisms.
+- **zsh does NOT expand `$'\t'` inside an associative-array subscript**: `a[x$'\t'y]`
+  stores the six characters `$'\t'`. Lookups spelled the same way still match, so it
+  hides until something splits the key. Build keys with a variable (`$_T`, a real
+  tab): `run_info[$host$_T$id]`.
 - Record schema (internal): `epoch \t host \t profile \t cfgdir \t id \t cwd \t ts \t
   snippet \t path \t title`. For display (`_ccfind_rec2row`) the leading epoch moves
   to field 9, before the title (field 10), so fields 1-8 keep the positions the fzf
   bindings name (`{1}` host, `{8}` path); the picker then appends an 11th composed
-  display field and shows only that (`--with-nth=11`). `_ccfind_parse_row` takes
-  path/epoch/title non-greedily and tolerates 10- and 11-field rows. EVERY record
+  display field and shows only that (`--with-nth=11`), plus a 12th: where the
+  session runs, for the preview (`{12}`). `_ccfind_parse_row` takes
+  path/epoch/title non-greedily and tolerates 10- to 12-field rows. EVERY record
   carries the title field — a pre-title host's 8-field wire line is padded at ingest,
   or its path would be read as the title. Colour lives in the display field ONLY — the
   data fields must stay parseable.

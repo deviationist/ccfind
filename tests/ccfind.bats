@@ -822,8 +822,10 @@ JSONL
   run_ccfind -i deploy
   [ "$status" -eq 0 ]
   local row; row="$(head -1 "$FZF_ROWS")"
-  # 11 fields: host, profile, cfgdir, id, cwd, ts, snippet, path, epoch, title, display
-  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 11 ]
+  # 12 fields: host, profile, cfgdir, id, cwd, ts, snippet, path, epoch, title,
+  # display, and where it is running (for the preview; empty when it is not)
+  [ "$(awk -F'\t' '{print NF}' <<<"$row")" -eq 12 ]
+  assert_equal "$(cut -f12 <<<"$row")" ""
   # the data fields are what the resume and the preview read — no SGR in them,
   # or a host stops matching and a path stops opening.
   [ "$(cut -f1 <<<"$row")" = "local" ]
@@ -2517,9 +2519,11 @@ remote_resume_cmd() {
   login_shell_loads_ccfind "$REMOTE_HOME" "$REMOTE_CCFIND_DIR/ccfind.zsh"
   mkdir -p "$BATS_TEST_TMPDIR/srv/app"
   mk_session "$REMOTE_HOME/.claude" "$BATS_TEST_TMPDIR/srv/app" R1 "termx"
-  mk_running "$REMOTE_HOME/.claude" R1
+  # The line is printed before the session starts (a printed list is a
+  # snapshot); the host's check happens when it is run, which is the point.
   run_ccfind -N -R -H nas termx
   local rcmd; rcmd="$(remote_resume_cmd)"
+  mk_running "$REMOTE_HOME/.claude" R1
   run env HOME="$REMOTE_HOME" PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c "$rcmd" </dev/null
   assert_equal "$status" 1
   assert_contains "$output" "already running on nas (pid $RUN_PID"
@@ -2533,9 +2537,9 @@ remote_resume_cmd() {
   printf 'ccfind() { print -u2 "ccfind: unknown option $1"; return 2; }\n' >> "$REMOTE_HOME/.shrc"
   mkdir -p "$BATS_TEST_TMPDIR/srv/app"
   mk_session "$REMOTE_HOME/.claude" "$BATS_TEST_TMPDIR/srv/app" R1 "termx"
-  mk_running "$REMOTE_HOME/.claude" R1       # it cannot know; the old command does not check
   run_ccfind -N -R -H nas termx
   local rcmd; rcmd="$(remote_resume_cmd)"
+  mk_running "$REMOTE_HOME/.claude" R1       # it cannot know; the old command does not check
   run env HOME="$REMOTE_HOME" PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c "$rcmd" </dev/null
   assert_equal "$status" 0
   assert_contains "$output" "CLAUDE argv=[--resume R1]"
@@ -2569,4 +2573,234 @@ remote_resume_cmd() {
   run_ccfind -H "a b" --resume R1
   assert_equal "$status" 2
   assert_contains "$output" "--resume takes one host"
+}
+
+# --- markers: running now (green) and recent activity (yellow) ----------------
+# A green ● marks a session running right now (Claude Code's own records,
+# checked as for --resume); a yellow ● one whose transcript changed in the last
+# CCFIND_RECENT minutes (default 15). Running wins. Without colour, recent is a
+# hollow ○ so the two still differ. In the flat list a running hit says where
+# it runs and prints what reaches it, never a resume line.
+
+@test "marker: activity in the last 15 minutes is marked recent (○ without colour)" {
+  export CCFIND_NOW=1800000000
+  mk_session "$FIXHOME/.claude" "/proj/new" s1 "termx"; age_session "$FIXHOME/.claude" "/proj/new" s1 300
+  mk_session "$FIXHOME/.claude" "/proj/old" s2 "termx"; age_session "$FIXHOME/.claude" "/proj/old" s2 1800
+  run_ccfind -N termx
+  assert_equal "$status" 0
+  assert_contains "$output" "○ "
+  assert_equal "$(grep -c '^○ .*/proj/new$' <<<"$output")" 1
+  assert_equal "$(grep -c '^  .*/proj/old$' <<<"$output")" 1   # the column, kept aligned
+}
+
+@test "marker: recent is yellow with colour on" {
+  export CCFIND_NOW=1800000000 CCFIND_COLOR=always
+  mk_session "$FIXHOME/.claude" "/proj/new" s1 "termx"; age_session "$FIXHOME/.claude" "/proj/new" s1 60
+  run_ccfind -N termx
+  assert_contains "$output" $'\033[1;33m●\033[0m '
+  refute_contains "$output" "○"
+}
+
+@test "marker: CCFIND_RECENT widens the window, 0 turns it off" {
+  export CCFIND_NOW=1800000000
+  mk_session "$FIXHOME/.claude" "/proj/old" s2 "termx"; age_session "$FIXHOME/.claude" "/proj/old" s2 1800
+  export CCFIND_RECENT=60
+  run_ccfind -N termx
+  assert_equal "$(grep -c '^○ .*/proj/old$' <<<"$output")" 1
+  export CCFIND_RECENT=0
+  run_ccfind -N termx
+  refute_contains "$output" "○"
+  assert_equal "$(grep -c '^20.*/proj/old$' <<<"$output")" 1  # no marker column at all
+}
+
+@test "marker: a running session outside tmux is green, says where, and prints no resume" {
+  install_claude_stub
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  mk_running "$FIXHOME/.claude" S1
+  run_ccfind -N termx
+  assert_equal "$status" 0
+  assert_equal "$(grep -c '^● .*/proj/a$' <<<"$output")" 1
+  refute_contains "$output" "○"                       # running wins over recent
+  assert_contains "$output" "   ● running (pid $RUN_PID, no terminal), outside tmux"
+  assert_contains "$output" "(finish it there; ccfind -f --resume S1 starts a second one)"
+  refute_contains "$output" "claude --resume S1"
+}
+
+@test "marker: a running session in a tmux pane prints the attach command" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock default)" work 2 1
+  run_ccfind -N termx
+  assert_contains "$output" "   ● running in tmux session 'work' (window 2, pane 1)"
+  assert_contains "$output" "   tmux attach -t '=work'"
+  refute_contains "$output" "claude --resume S1"
+}
+
+@test "marker: a pane on a named tmux server is attached with -L" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock claude-rc)" claude-rc
+  run_ccfind -N termx
+  assert_contains "$output" "   tmux -L claude-rc attach -t '=claude-rc'"
+}
+
+@test "marker: inside that tmux server, the list prints switch-client instead" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  local sock; sock="$(tmux_sock default)"
+  mk_running "$FIXHOME/.claude" S1 "$sock" work
+  export TMUX="$sock,123,0"
+  run_ccfind -N termx
+  assert_contains "$output" "   tmux switch-client -t '=work'"
+  refute_contains "$output" "attach -t"
+}
+
+@test "marker: negative control: a record whose process is gone is not marked running" {
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  mk_running "$FIXHOME/.claude" S1
+  kill "$RUN_PID" "$RUN_PANE_PID"; wait "$RUN_PANE_PID" 2>/dev/null || true
+  run_ccfind -N termx
+  refute_contains "$output" "● running"
+  assert_contains "$output" "claude --resume S1"
+}
+
+@test "marker: the picker marks the running row green and field 12 says where" {
+  install_fzf_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx one"
+  mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx two"
+  mk_running "$FIXHOME/.claude" S1
+  export CCFIND_COLOR=always CCFIND_RECENT=0
+  run_ccfind -i termx
+  local r1 r2
+  r1="$(grep -P '^[^\t]*\t[^\t]*\t[^\t]*\tS1\t' "$FZF_ROWS" 2>/dev/null || awk -F'\t' '$4 == "S1"' "$FZF_ROWS")"
+  r2="$(awk -F'\t' '$4 == "S2"' "$FZF_ROWS")"
+  assert_contains "$(cut -f11 <<<"$r1")" $'\033[1;32m●\033[0m '
+  assert_equal "$(cut -f12 <<<"$r1")" "running (pid $RUN_PID, no terminal), outside tmux"
+  assert_equal "$(cut -f11 <<<"$r2" | cut -c1-2)" "  "     # unmarked rows keep the column
+  assert_equal "$(cut -f12 <<<"$r2")" ""
+  assert_contains "$(cat "$FZF_ARGV")" "_ccfind_preview {1} {8} {12}"
+}
+
+@test "marker: the preview header says where the session is running" {
+  local f="$FIXHOME/.claude/projects/-p/S1.jsonl"
+  mk_transcript "$f" "hello" "hi"
+  run env HOME="$FIXHOME" NO_COLOR=1 CCFIND_LOCAL_LABELS="local" \
+      zsh -fc 'src=$1; shift; source "$src"; _ccfind_preview "$@"' _ "$CCFIND_ZSH" \
+      local "$f" "running in tmux session 'work' (window 0, pane 0)"
+  assert_contains "$output" "● running in tmux session 'work' (window 0, pane 0)"
+  run env HOME="$FIXHOME" NO_COLOR=1 CCFIND_LOCAL_LABELS="local" \
+      zsh -fc 'src=$1; shift; source "$src"; _ccfind_preview "$@"' _ "$CCFIND_ZSH" local "$f" ""
+  refute_contains "$output" "●"
+}
+
+@test "marker: --json carries running (null when not running)" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx one"
+  mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx two"
+  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock claude-rc)" claude-rc 1 0
+  run_ccfind --json termx
+  assert_equal "$status" 0
+  run python3 -c '
+import json, sys
+r = {x["id"]: x["running"] for x in json.load(sys.stdin)["results"]}
+print(r["S2"]); s = r["S1"]
+print(s["in_tmux"], s["tmux_server"], s["tmux_session"], s["tmux_window"], s["tmux_pane"])' <<<"$output"
+  assert_equal "${lines[0]}" "None"
+  assert_equal "${lines[1]}" "True -L claude-rc claude-rc 1 0"
+}
+
+@test "marker: --running lists only running sessions" {
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx one"
+  mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx two"
+  mk_running "$FIXHOME/.claude" S2
+  run_ccfind -N --running termx
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/b"
+  refute_contains "$output" "/proj/a"
+}
+
+@test "marker: --running keeps a long-idle running session newer hits would cap away" {
+  export CCFIND_NOW=1800000000
+  mk_session "$FIXHOME/.claude" "/proj/idle" S1 "termx"; age_session "$FIXHOME/.claude" "/proj/idle" S1 7200
+  mk_session "$FIXHOME/.claude" "/proj/new" S2 "termx";  age_session "$FIXHOME/.claude" "/proj/new" S2 60
+  mk_running "$FIXHOME/.claude" S1
+  run_ccfind -N -n 1 --running termx
+  assert_contains "$output" "/proj/idle"
+  refute_contains "$output" "/proj/new"
+}
+
+@test "marker: --running with nothing running says so" {
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  run_ccfind -N --running termx
+  assert_contains "$output" "No matching sessions."
+  assert_contains "$output" "running sessions only"
+}
+
+@test "marker: --tsv sends #running lines only when the caller asks" {
+  mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
+  mk_running "$FIXHOME/.claude" S1
+  run_ccfind --tsv termx
+  refute_contains "$output" "#running"              # what an older caller gets: nothing new
+  export CCFIND_STATUS=1
+  run_ccfind --tsv termx
+  assert_contains "$output" "#running"$'\t'"S1"$'\t'"term"$'\t'"$RUN_PID"$'\t'
+}
+
+@test "marker: a host's own ccfind reports what runs there" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  mk_running "$REMOTE_HOME/.claude" R1
+  run_ccfind -N -R -H nas termx
+  assert_equal "$status" 0
+  assert_contains "$output" "● running on nas (pid $RUN_PID, no terminal), outside tmux"
+  assert_contains "$output" "(finish it there; ccfind -H nas -f --resume R1 starts a second one)"
+}
+
+@test "marker: a session in a host's tmux pane prints ssh + attach" {
+  install_ssh_stub_real_host
+  install_tmux_stub
+  mk_session "$REMOTE_HOME/.claude-personal" "/srv/side" R2 "termx"
+  mk_running "$REMOTE_HOME/.claude-personal" R2 "$(tmux_sock claude-rc)" claude-rc
+  run_ccfind -N -R -H nas termx
+  assert_contains "$output" "running in tmux session 'claude-rc' (window 0, pane 0) on nas"
+  assert_contains "$output" "   ssh -t nas tmux -L claude-rc attach -t '=claude-rc'"
+}
+
+@test "marker: --running asks the host to narrow, and --json carries its status" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/a" R1 "termx one"
+  mk_session "$REMOTE_HOME/.claude" "/srv/b" R2 "termx two"
+  mk_running "$REMOTE_HOME/.claude" R2
+  run_ccfind -R -H nas --running --json termx
+  run python3 -c '
+import json, sys
+d = json.load(sys.stdin)["results"]
+print(len(d), d[0]["id"], d[0]["host"], d[0]["running"]["pid"])' <<<"$output"
+  assert_equal "$output" "1 R2 nas $RUN_PID"
+}
+
+@test "marker: a host without ccfind sends no status; nothing breaks, --running shows none" {
+  install_ssh_stub_bare_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  mk_running "$REMOTE_HOME/.claude" R1
+  run_ccfind -N -R -H nas termx
+  assert_equal "$status" 0
+  assert_contains "$output" "nas:/srv/app"
+  refute_contains "$output" "● running"
+  run_ccfind -N -R -H nas --running termx
+  assert_contains "$output" "No matching sessions."
+}
+
+@test "marker: --running narrows ON the host, before its cap" {
+  # With -n 1 the host only ever sends its newest hit. Only if it narrowed to
+  # running sessions first can a long-idle running one arrive at all.
+  install_ssh_stub_real_host
+  export CCFIND_NOW=1800000000
+  mk_session "$REMOTE_HOME/.claude" "/srv/idle" R1 "termx"; age_session "$REMOTE_HOME/.claude" "/srv/idle" R1 7200
+  mk_session "$REMOTE_HOME/.claude" "/srv/new" R2 "termx";  age_session "$REMOTE_HOME/.claude" "/srv/new" R2 60
+  mk_running "$REMOTE_HOME/.claude" R1
+  run_ccfind -N -n 1 -R -H nas --running termx
+  assert_contains "$output" "nas:rwork:/srv/idle"
+  refute_contains "$output" "/srv/new"
 }
