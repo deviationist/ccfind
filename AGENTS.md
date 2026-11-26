@@ -127,7 +127,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   <pid ns>`); formats read off live records 2026-11-26. Each check has a test with
   a negative control (dead pid, reused pid, foreign domain, no procStart). Running
   in a tmux pane (`_ccfind_find_pane`: claude or an ancestor is a `pane_pid`, on
-  EVERY socket in `$TMUX_TMPDIR/tmux-<uid>/`, e.g. the `-L claude-rc` server; dead
+  EVERY socket in `$TMUX_TMPDIR/tmux-<uid>/`, e.g. a server started with `-L <name>`; dead
   sockets skipped) → `[Y/n]` attach, or switch-client inside that same server;
   nested (inside tmux, other server, or `--from-tmux`) → refuse + the attach
   command. Running outside tmux → refuse, `-f/--force` overrides. **tmux is never
