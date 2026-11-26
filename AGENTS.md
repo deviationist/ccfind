@@ -14,6 +14,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -d <dir>     scope to sessions whose cwd is <dir> or below
   -x           exact scope: that dir ONLY, no subdirs (dir defaults to $PWD)
   -s | -I | -S case-sensitive / force-insensitive / smart-case (= CCFIND_CASE)
+  -t | -T      resume inside tmux / in this terminal (= CCFIND_TMUX)
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
@@ -90,6 +91,18 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   `--json` carries the resolved boolean (`case_sensitive`) beside the mode it came
   from (`case_mode`); `_ccfind_hl`'s 4th arg and `CCFIND_PV_CASE` keep the list and
   preview highlights marking exactly what the grep matched.
+- **tmux resume (`-t` / `CCFIND_TMUX=1`; `-T` off):** the resume becomes
+  `tmux new-session -A -s cc-<cwd basename>-<id[1,8]> -c <cwd> "exec $SHELL -ic
+  '<claude --resume …>'"` (`_ccfind_tmux_line`). The name is derived from the hit,
+  never fresh, so a second Enter while that claude runs ATTACHES rather than
+  starting a second claude on one transcript; the session closes when claude
+  exits. `$SHELL -ic`, not bare: `claude` is often an rc function (tmux starts a
+  window with `sh -c`, which never sees it). The caller's shell is not `cd`'d.
+  ONE string: the flat list prints it, the picker `eval`s it. **`$TMUX` set →
+  skipped entirely** (local and remote: no tmux in tmux). Remote hits get tmux
+  ON THE HOST (survives a dropped link), with a plain-resume fallback when the
+  host has none; `CCFIND_REMOTE_RESUME` still wins. No local tmux → one stderr
+  warning, plain resume (`_ccfind_tmux_here`, lazy so `-R` never warns).
 - **Session title:** the name `claude --resume` shows, read from the transcript's own
   title records — last `custom-title` (`/rename`) beats last `ai-title` (generated,
   rewritten as the session grows) beats legacy `summary`. One awk program
@@ -124,6 +137,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_HOSTS` | unset | ssh aliases for `-r`/`ccfindr` (env or `.env`) |
 | `CCFIND_REMOTE_RESUME` | unset | override remote resume: called `<cmd> <host> <cwd> <id>` (wrap in tmux/screen) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
+| `CCFIND_TMUX` | 0 | `1` → resume inside tmux by default (`-t`/`-T` override; skipped inside tmux) |
 | `CCFIND_CASE` | insensitive | case matching: `insensitive` / `sensitive` / `smart` (`-s`/`-I`/`-S` override) |
 | `CCFIND_TIME` | both | time column: `both` (mtime + age) / `abs` (mtime) / `rel` (age) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |

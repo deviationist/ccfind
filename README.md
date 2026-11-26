@@ -42,6 +42,7 @@ ccfind -x <text...>                # only sessions whose cwd is EXACTLY $PWD (no
 ccfind -x -d <dir> <text...>       # same, for a directory other than $PWD
 ccfind -s <text...>                # case-SENSITIVE match (-I forces insensitive)
 ccfind -S <text...>                # smart-case: sensitive only if <text> has a capital
+ccfind -t <text...>                # resume inside a tmux session (-T: in this terminal)
 ccfind -n <max> <text...>          # cap the number of hits shown (default 10)
 ccfind -N <text...>                # force the flat-list output (opt out of the picker)
 ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0 + the TTY check)
@@ -72,7 +73,7 @@ directory, and the matching text with the search term picked out.
 | Key | Action |
 |---|---|
 | `↑` / `↓` | Move between hits |
-| `Enter` | `cd` to the session's recorded cwd (when different from `$PWD`) and run `claude --resume <id>` in the current shell |
+| `Enter` | `cd` to the session's recorded cwd (when different from `$PWD`) and run `claude --resume <id>` in the current shell — or, with `-t` / `CCFIND_TMUX=1`, open it in a tmux session ([Resuming in tmux](#resuming-in-tmux)) |
 | `→` | Open the **preview pane** — last ~8 user + assistant messages of the highlighted session (text only; tool calls/results reduced to `[tool: <name>]` / `[tool result]`, thinking blocks omitted) |
 | `←` | Hide the preview pane again |
 | `Esc` | Cancel — no `cd`, no resume |
@@ -109,6 +110,44 @@ ccfind -n 50 deploy              # show up to 50 hits (same as CCFIND_MAX=50)
 ccfind -N deploy                 # flat-list output, copy/paste the resume command
 ccfind deploy | less             # auto-flat-list (no TTY on stdout)
 ```
+
+## Resuming in tmux
+
+`-t` / `--tmux` resumes the session inside a tmux session instead of in the
+current terminal. To make that the default, set it once:
+
+```zsh
+# .env beside ccfind.zsh  (or export from ~/.zshrc)
+typeset CCFIND_TMUX=1
+```
+
+`-T` / `--no-tmux` then resumes one call in the current terminal instead.
+
+- **One tmux session per Claude session.** It is named after the hit, as
+  `cc-<dir>-<id>` (the cwd's last component and the first 8 characters of the
+  session id, e.g. `cc-myproject-1a2b3c4d`), and opened with
+  `tmux new-session -A`. Pick the same hit again while that claude is still
+  running and you are attached to it, rather than a second `claude --resume`
+  starting on the same transcript. When claude exits, its tmux session closes.
+- **Already inside tmux, nothing changes.** When `$TMUX` is set, the session
+  resumes in the current pane exactly as it would without `-t`, so you never get
+  tmux inside tmux.
+- **Your shell stays put.** The tmux session starts in the session's directory
+  (`-c <cwd>`), so the shell you ran ccfind from is not `cd`'d, and detaching
+  returns you to where you were.
+- **Your `claude` wrapper still applies.** The window runs
+  `"$SHELL" -ic 'claude --resume <id>'`, so a `claude` that is a function or alias
+  in your rc (a profile switcher, say) is the one that runs, as it would at your
+  prompt. Seat pinning is unchanged: `CLAUDE_CONFIG_DIR` goes on that inner
+  command exactly as on the plain resume line.
+- **Remote hits get tmux on the host.** The ssh resume becomes
+  `ssh -t <host> 'cd <cwd> && exec "$SHELL" -ic "tmux new-session -A …"'`, so the
+  session survives a dropped connection and the next resume picks it back up. A
+  host without tmux resumes plainly and says so. `CCFIND_REMOTE_RESUME`, when
+  set, still takes over remote hits entirely.
+- **No tmux on this machine:** one warning, then the plain resume.
+
+The flat list prints the same tmux line Enter would run, so it can be copied.
 
 ## Directory scope: `-d` vs `-x`
 
@@ -480,9 +519,11 @@ is stable enough to script against — no escaping to undo, since tabs and contr
 characters are stripped from snippets and titles. `title` came last so the first eight
 columns mean what they always did; a host whose ccfind predates it sends eight.
 
-### Custom remote resume (tmux, screen, mosh, …)
+### Custom remote resume (screen, mosh, …)
 
-By default, resuming a remote hit runs
+For tmux, `-t` / `CCFIND_TMUX=1` is built in (see
+[Resuming in tmux](#resuming-in-tmux)); this hook is for anything else, or for a
+tmux setup of your own. By default, resuming a remote hit runs
 `ssh -t <host> 'cd <cwd> && exec "$SHELL" -ic claude --resume <id>'`. Set
 `CCFIND_REMOTE_RESUME` to your own command or function and ccfind calls it as
 
@@ -505,8 +546,8 @@ claude-ssh-tmux() {
 }
 ```
 
-ccfind stays agnostic — it knows nothing about tmux/screen, it just calls your
-hook. The flat list prints the same `<cmd> <host> <cwd> <id>` invocation, so it's
+When the hook is set it takes over every remote resume, with or without `-t`.
+The flat list prints the same `<cmd> <host> <cwd> <id>` invocation, so it's
 copy/paste-able too.
 
 ### Per-host tab views (`CCFIND_TABS=1`)
@@ -549,6 +590,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_PROFILE_PATH` | *(unset)* | Where `claude-profile.py` lives, if not one of the conventional paths. Only consulted when `CCFIND_PROFILES` is unset. |
 | `CCFIND_PROFILE_CMD` | *(unset)* | Command to ask for the profile list instead of `claude-profile` (called as `<cmd> list`, expecting `label<TAB>dir` lines). |
 | `CCFIND_CASE` | `insensitive` | Default case matching: `insensitive`, `sensitive`, or `smart` (sensitive only when the query has a capital). `-s` / `-I` / `-S` override per call. |
+| `CCFIND_TMUX` | `0` | `1` → resume hits inside a tmux session by default (skipped when already inside tmux). `-t` / `-T` override per call. |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_TIME` | `both` | Time column: `both` = mtime + age, `abs` = mtime only, `rel` = age only. |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
