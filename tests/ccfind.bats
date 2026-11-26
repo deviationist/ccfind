@@ -2382,20 +2382,20 @@ remote_resume_cmd() {
 }
 
 @test "resume: a pane on a named tmux server is found, and named with -L" {
-  # The homelab's claude-rc service runs claude in `tmux -L claude-rc`: a
-  # second server beside `default`, invisible to a plain `tmux ls`. A dead
-  # `default` socket (server gone, file left) sits beside it, as on the servers.
+  # A service that keeps claude in `tmux -L svc` runs a second tmux server
+  # beside `default`, invisible to a plain `tmux ls`. A dead `default` socket
+  # (server gone, file left behind) sits beside it, as it does in the wild.
   install_claude_stub
   install_tmux_stub
   mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR" S1 "termx"
   tmux_sock default >/dev/null
-  local sock; sock="$(tmux_sock claude-rc)"
-  mk_running "$FIXHOME/.claude" S1 "$sock" claude-rc
+  local sock; sock="$(tmux_sock svc)"
+  mk_running "$FIXHOME/.claude" S1 "$sock" svc
   run_ccfind --resume S1
   assert_equal "$status" 1
-  assert_contains "$output" "To attach: tmux -L claude-rc attach -t '=claude-rc'"
+  assert_contains "$output" "To attach: tmux -L svc attach -t '=svc'"
   run_ccfind_answer y --resume S1
-  assert_contains "$output" "TMUX attached to [=claude-rc] on [$sock]"
+  assert_contains "$output" "TMUX attached to [=svc] on [$sock]"
 }
 
 @test "resume: without tmux installed, a running session is simply 'outside tmux'" {
@@ -2429,13 +2429,13 @@ remote_resume_cmd() {
   install_tmux_stub
   mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR" S1 "termx"
   local mine; mine="$(tmux_sock default)"
-  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock claude-rc)" claude-rc
+  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock svc)" svc
   export TMUX="$mine,123,0"
   run_ccfind_answer y --resume S1
   assert_equal "$status" 1
   assert_contains "$output" "you are inside tmux, and this session is already running inside another active tmux session"
   assert_contains "$output" "From outside tmux, run:"
-  assert_contains "$output" "tmux -L claude-rc attach -t '=claude-rc'"
+  assert_contains "$output" "tmux -L svc attach -t '=svc'"
   refute_contains "$output" "TMUX switched"
   refute_contains "$output" "TMUX attached"
 }
@@ -2446,10 +2446,10 @@ remote_resume_cmd() {
   install_tmux_stub
   mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR" S1 "termx"
   mk_running "$FIXHOME/.claude" S1 "$(tmux_sock default)" work
-  run_ccfind_answer y --resume S1 --from-tmux --as quim
+  run_ccfind_answer y --resume S1 --from-tmux --as host-b
   assert_equal "$status" 1
-  assert_contains "$output" "already running inside another active tmux session: tmux session 'work' (window 0, pane 0) on quim"
-  assert_contains "$output" "ssh -t quim tmux attach -t '=work'"
+  assert_contains "$output" "already running inside another active tmux session: tmux session 'work' (window 0, pane 0) on host-b"
+  assert_contains "$output" "ssh -t host-b tmux attach -t '=work'"
   refute_contains "$output" "TMUX attached"
 }
 
@@ -2640,9 +2640,9 @@ remote_resume_cmd() {
 @test "marker: a pane on a named tmux server is attached with -L" {
   install_tmux_stub
   mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx"
-  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock claude-rc)" claude-rc
+  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock svc)" svc
   run_ccfind -N termx
-  assert_contains "$output" "   tmux -L claude-rc attach -t '=claude-rc'"
+  assert_contains "$output" "   tmux -L svc attach -t '=svc'"
 }
 
 @test "marker: inside that tmux server, the list prints switch-client instead" {
@@ -2698,7 +2698,7 @@ remote_resume_cmd() {
   install_tmux_stub
   mk_session "$FIXHOME/.claude" "/proj/a" S1 "termx one"
   mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx two"
-  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock claude-rc)" claude-rc 1 0
+  mk_running "$FIXHOME/.claude" S1 "$(tmux_sock svc)" svc 1 0
   run_ccfind --json termx
   assert_equal "$status" 0
   run python3 -c '
@@ -2707,7 +2707,7 @@ r = {x["id"]: x["running"] for x in json.load(sys.stdin)["results"]}
 print(r["S2"]); s = r["S1"]
 print(s["in_tmux"], s["tmux_server"], s["tmux_session"], s["tmux_window"], s["tmux_pane"])' <<<"$output"
   assert_equal "${lines[0]}" "None"
-  assert_equal "${lines[1]}" "True -L claude-rc claude-rc 1 0"
+  assert_equal "${lines[1]}" "True -L svc svc 1 0"
 }
 
 @test "marker: --running lists only running sessions" {
@@ -2761,10 +2761,10 @@ print(s["in_tmux"], s["tmux_server"], s["tmux_session"], s["tmux_window"], s["tm
   install_ssh_stub_real_host
   install_tmux_stub
   mk_session "$REMOTE_HOME/.claude-personal" "/srv/side" R2 "termx"
-  mk_running "$REMOTE_HOME/.claude-personal" R2 "$(tmux_sock claude-rc)" claude-rc
+  mk_running "$REMOTE_HOME/.claude-personal" R2 "$(tmux_sock svc)" svc
   run_ccfind -N -R -H nas termx
-  assert_contains "$output" "running in tmux session 'claude-rc' (window 0, pane 0) on nas"
-  assert_contains "$output" "   ssh -t nas tmux -L claude-rc attach -t '=claude-rc'"
+  assert_contains "$output" "running in tmux session 'svc' (window 0, pane 0) on nas"
+  assert_contains "$output" "   ssh -t nas tmux -L svc attach -t '=svc'"
 }
 
 @test "marker: --running asks the host to narrow, and --json carries its status" {

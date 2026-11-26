@@ -150,7 +150,7 @@ Running wins when both apply. Without colour (piped output, `NO_COLOR`, `-C`) th
 recent marker is a hollow **○**, so the two still differ.
 
 For a running session the picker's preview says where it runs ("running in tmux
-session 'work' (window 2, pane 1) on xavi"), and the flat list adds that line and
+session 'work' (window 2, pane 1) on host-a"), and the flat list adds that line and
 prints what reaches it in place of a resume command, which would start a second
 claude on it: `tmux attach -t '=work'` (`ssh -t <host> …` for another machine,
 `tmux switch-client …` when you are inside that same tmux server). A session

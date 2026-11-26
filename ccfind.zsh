@@ -1182,7 +1182,8 @@ function ccfind() {
   # _ccfind_pane_table → _panes, one "socket<TAB>pane pid<TAB>session<TAB>
   # window<TAB>pane" line per tmux pane on this machine, read once per run.
   # Every tmux server the user owns is asked, not only the default one: a
-  # server started with -L <name> (the homelab's claude-rc service is one) has
+  # server started with -L <name> (a service that keeps claude in a tmux
+  # server of its own, say) has
   # its own socket beside `default`. A socket whose server is gone answers
   # nothing and is skipped. No tmux installed → no panes.
   local -a _panes; local _panes_read=0
