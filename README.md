@@ -10,7 +10,7 @@ session is a `.jsonl` transcript under
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
 <div align="center">
-  <img src="assets/demo-61a5d6.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+  <img src="assets/demo-21fa7b.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
 </div>
 
 ## Install
@@ -45,6 +45,7 @@ ccfind -S <text...>                # smart-case: sensitive only if <text> has a 
 ccfind -t <text...>                # resume inside a tmux session (-T: in this terminal)
 ccfind --resume <id>               # resume that session, checking it is not already running
 ccfind -f --resume <id>            # start it even though it is running
+ccfind --running [-r] [text...]    # only the sessions running right now (green ●)
 ccfind -n <max> <text...>          # cap the number of hits shown (default 10)
 ccfind -N <text...>                # force the flat-list output (opt out of the picker)
 ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0 + the TTY check)
@@ -69,7 +70,7 @@ and how long ago that was, which profile or host it belongs to, its working
 directory, and the matching text with the search term picked out.
 
 <div align="center">
-  <img src="assets/picker-61a5d6.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+  <img src="assets/picker-21fa7b.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
 </div>
 
 | Key | Action |
@@ -88,7 +89,7 @@ before committing to one. On a remote hit the transcript is fetched over ssh on
 demand (once per session, then cached for as long as the picker is open):
 
 <div align="center">
-  <img src="assets/preview-61a5d6.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+  <img src="assets/preview-21fa7b.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
 </div>
 
 ### Flat-list fallback
@@ -101,7 +102,7 @@ when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`
 `CCFIND_INTERACTIVE=0` is set.
 
 <div align="center">
-  <img src="assets/list-61a5d6.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+  <img src="assets/list-21fa7b.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
 </div>
 
 ```zsh
@@ -112,6 +113,35 @@ ccfind -n 50 deploy              # show up to 50 hits (same as CCFIND_MAX=50)
 ccfind -N deploy                 # flat-list output, copy/paste the resume command
 ccfind deploy | less             # auto-flat-list (no TTY on stdout)
 ```
+
+## Markers: running now and recent activity
+
+A hit can carry a marker in front of it, in the picker and in the flat list:
+
+| Marker | Means |
+|---|---|
+| green **●** | the session is **running right now**, on that machine |
+| yellow **●** | its transcript changed in the **last 15 minutes** (`CCFIND_RECENT`, in minutes; `0` turns it off) |
+
+Running wins when both apply. Without colour (piped output, `NO_COLOR`, `-C`) the
+recent marker is a hollow **○**, so the two still differ.
+
+For a running session the picker's preview says where it runs ("running in tmux
+session 'work' (window 2, pane 1) on xavi"), and the flat list adds that line and
+prints what reaches it in place of a resume command, which would start a second
+claude on it: `tmux attach -t '=work'` (`ssh -t <host> …` for another machine,
+`tmux switch-client …` when you are inside that same tmux server). A session
+running outside tmux gets no command, since nothing can join it.
+
+`--running` lists only the sessions running right now, across every host you
+search (`ccfind --running -r` is the fleet's live sessions). A long-idle
+session that is still running is found even when newer hits would otherwise
+fill the `-n` budget.
+
+The markers are a snapshot taken when the search ran; Enter checks again before
+it does anything. A host is asked what runs there by its own ccfind, in the
+connection the search already makes. A host without ccfind sends no running
+status, so its hits carry no green marker, and `--running` shows none of them.
 
 ## Resuming a session that is already running
 
@@ -274,6 +304,9 @@ The colours carry information rather than decoration:
 - the **search term** is picked out inside every snippet, in the list, in the picker
   and in the preview pane, so you can see *why* each session matched;
 - the **resume command** is green: the line you copy;
+- the **marker** in front of a hit: green ● when that session is running right now,
+  yellow ● when it was active in the last `CCFIND_RECENT` minutes (see
+  [Markers](#markers-running-now-and-recent-activity));
 - timestamps, ages, separators and the surrounding snippet text are dimmed out of the way.
 
 Colour switches itself off the moment stdout is not a terminal, so
@@ -529,7 +562,9 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
       "config_dir": "/home/you/.claude-media", "id": "e5710b93",
       "title": "Nightly backup connection refused",
       "cwd": "/srv/backup", "mtime": "2026-08-12 08:17:41",
-      "snippet": "…", "path": "/home/you/.claude-media/projects/-srv-backup/e5710b93.jsonl"
+      "snippet": "…", "path": "/home/you/.claude-media/projects/-srv-backup/e5710b93.jsonl",
+      "running": {"in_tmux": true, "pid": 4123, "terminal": "pts/1",
+                  "tmux_server": "", "tmux_session": "work", "tmux_window": "2", "tmux_pane": "1"}
     }
   ]
 }
@@ -544,7 +579,10 @@ alias; `profile` is empty on a machine with no profiles
 configured; `config_dir` is the dir that hit belongs to, *on that machine*, which is
 what a consumer needs to resume it into the right seat. `title` is the name
 `claude --resume` lists the session under — a `/rename` if you gave it one, else
-the generated title — and empty for a session too young to have one. The document is well-formed
+the generated title — and empty for a session too young to have one. `running` is
+`null` unless the session was running when the search ran; then it says where
+(`tmux_server` is `""` for the default tmux server, else `-L <name>` / `-S <path>`).
+The document is well-formed
 even when nothing matched (`"results": []`) — and JSON output never opens the picker
 and is never coloured, whatever else is set.
 
@@ -600,7 +638,7 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 local-only runs, or when `CCFIND_TABS` is unset.
 
 <div align="center">
-  <img src="assets/tabs-61a5d6.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+  <img src="assets/tabs-21fa7b.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
 </div>
 
 ## Notes
@@ -631,6 +669,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_TMUX` | `0` | `1` → sessions that live on this machine resume inside a tmux session by default (never nested inside tmux; needs tmux, which is otherwise not required). `-t` / `-T` override per call. |
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_TIME` | `both` | Time column: `both` = mtime + age, `abs` = mtime only, `rel` = age only. |
+| `CCFIND_RECENT` | `15` | Minutes a session counts as recently active (yellow marker). `0` turns the marker off. |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |
 | `CCFIND_COLOR` | `auto` | `always` / `never` override the "colour only on a terminal" default. `NO_COLOR` and `-C` also force plain. |
