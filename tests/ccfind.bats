@@ -1911,3 +1911,270 @@ STALE
   run python3 -c 'import json,sys; r=json.load(sys.stdin)["results"][0]; print(r["path"], repr(r["title"]), r["epoch"])' <<<"$output"
   assert_equal "$output" "/remote/proj/RID123.jsonl '' 1700000000"
 }
+
+# --- tmux: resume inside a tmux session ---------------------------------------
+# -t / CCFIND_TMUX=1 wrap the resume in `tmux new-session -A`, named after the
+# hit, so Enter on the same hit while its claude still runs reattaches instead
+# of starting a second claude on one transcript. Already inside tmux ($TMUX
+# set), it is skipped. The window runs claude via "$SHELL" -ic, because on a
+# real machine `claude` is usually an rc function (install_login_shell models
+# that, with a tripwire for the bare binary).
+
+# remote_resume_cmd — the whole command the emitted `ssh -t <host> …` line
+# hands the far end's login shell, unquoted the one layer the local shell owns.
+remote_resume_cmd() {
+  local line
+  line="$(printf '%s\n' "$output" | grep -m1 -- 'ssh -t ' | sed 's/^ *//')"
+  bash -c "printf '%s' ${line#ssh -t * }"
+}
+
+@test "tmux: -t prints a tmux line named after the session's dir and id" {
+  install_tmux_stub
+  mkdir -p "$BATS_TEST_TMPDIR/my.proj dir"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/my.proj dir" 1a2b3c4d-e5f6 "termx"
+  run_ccfind -N -t termx
+  assert_equal "$status" 0
+  # tmux takes neither `.` nor `:` in a name; the id is cut to 8 characters
+  assert_contains "$output" "tmux new-session -A -s cc-my-proj-dir-1a2b3c4d -c "
+  assert_contains "$output" "claude --resume 1a2b3c4d-e5f6"
+  refute_contains "$output" "&& claude"            # no cd: tmux -c does that
+}
+
+@test "tmux: off by default; CCFIND_TMUX=1 turns it on and -T back off" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "termx"
+  run_ccfind -N termx
+  refute_contains "$output" "tmux"
+  export CCFIND_TMUX=1
+  run_ccfind -N termx
+  assert_contains "$output" "tmux new-session -A -s cc-a-s1 -c /proj/a"
+  run_ccfind -N -T termx
+  refute_contains "$output" "tmux"
+  assert_contains "$output" "cd /proj/a && claude --resume s1"
+}
+
+@test "tmux: CCFIND_TMUX can be set in the .env beside the script" {
+  install_tmux_stub
+  printf 'typeset CCFIND_TMUX=1\n' > "${CCFIND_ZSH%/*}/.env"
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "termx"
+  run_ccfind -N termx
+  assert_equal "$status" 0
+  assert_contains "$output" "tmux new-session -A -s cc-a-s1"
+}
+
+@test "tmux: an unknown CCFIND_TMUX value warns and stays off" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "termx"
+  export CCFIND_TMUX=maybe
+  run_ccfind -N termx
+  assert_equal "$status" 0
+  assert_contains "$output" "CCFIND_TMUX=maybe is not one of 1|0"
+  refute_contains "$output" "tmux new-session"
+}
+
+@test "tmux: already inside tmux, -t resumes in the current pane" {
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "termx"
+  export TMUX="/private/sock,123,0" CCFIND_TMUX=1
+  run_ccfind -N -t termx
+  assert_equal "$status" 0
+  refute_contains "$output" "tmux new-session"
+  assert_contains "$output" "cd /proj/a && claude --resume s1"
+}
+
+@test "tmux: the printed line really resumes, through the rc's claude function" {
+  install_tmux_stub
+  install_login_shell "$FIXHOME"
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" S1 "termx"
+  run_ccfind -N -t termx
+  local line; line="$(resume_line_from_output)"
+  run_resume "$line"
+  assert_equal "$status" 0
+  assert_contains "$output" "TMUX new session [cc-proj-S1] in [$BATS_TEST_TMPDIR/proj]"
+  assert_contains "$output" "CLAUDE argv=[--resume S1]"
+  assert_contains "$output" "pwd=[$BATS_TEST_TMPDIR/proj]"
+  assert_contains "$output" "dir=[<unset>]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "tmux: negative control: the same window without -i misses the rc's claude" {
+  # The test above passes because of the interactive shell, not by luck: drop
+  # the -i and the window must land on the bare binary, as the real one would.
+  # If this ever passes through to the function, the login-shell model has
+  # stopped modelling anything and the test above proves nothing.
+  install_tmux_stub
+  install_login_shell "$FIXHOME"
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" S1 "termx"
+  run_ccfind -N -t termx
+  local line; line="$(resume_line_from_output)"
+  assert_contains "$line" " -ic "
+  run_resume "${line/ -ic / -c }"
+  assert_contains "$output" "CLAUDE-BARE argv=[--resume S1]"
+  refute_contains "$output" "CLAUDE argv="
+}
+
+@test "tmux: a profile hit resumes into its own seat; the default seat stays unset" {
+  install_tmux_stub
+  install_login_shell "$FIXHOME"
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$BATS_TEST_TMPDIR/personal" "$BATS_TEST_TMPDIR/proj" P1 "termx one"
+  mk_session "$FIXHOME/.claude"           "$BATS_TEST_TMPDIR/proj" D1 "termx two"
+  export CCFIND_PROFILES="personal:$BATS_TEST_TMPDIR/personal daily:$FIXHOME/.claude"
+  run_ccfind -N -t personal termx
+  run_resume "$(resume_line_from_output)"
+  assert_contains "$output" "CLAUDE argv=[--resume P1]"
+  assert_contains "$output" "dir=[$BATS_TEST_TMPDIR/personal]"
+  assert_contains "$output" "verdict=[RESUMED]"
+  run_ccfind -N -t daily termx
+  run_resume "$(resume_line_from_output)"
+  assert_contains "$output" "CLAUDE argv=[--resume D1]"
+  assert_contains "$output" "dir=[<unset>]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "tmux: Enter opens the session in tmux and leaves the caller's shell where it was" {
+  install_fzf_stub_select
+  install_tmux_stub
+  install_login_shell "$FIXHOME"
+  mkdir -p "$BATS_TEST_TMPDIR/proj" "$BATS_TEST_TMPDIR/elsewhere"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" S1 "termx"
+  run env HOME="$FIXHOME" zsh -fc \
+    'cd -- "$1" || exit 1; src=$2; shift 2; source "$src"; ccfind "$@"; echo "CALLER pwd=[$PWD]"' \
+    _ "$BATS_TEST_TMPDIR/elsewhere" "$CCFIND_ZSH" -i -t termx
+  assert_equal "$status" 0
+  assert_contains "$output" "TMUX new session [cc-proj-S1] in [$BATS_TEST_TMPDIR/proj]"
+  assert_contains "$output" "CLAUDE argv=[--resume S1]"
+  assert_contains "$output" "pwd=[$BATS_TEST_TMPDIR/proj]"
+  assert_contains "$output" "CALLER pwd=[$BATS_TEST_TMPDIR/elsewhere]"
+}
+
+@test "tmux: Enter on a hit whose claude still runs reattaches, never a second claude" {
+  install_fzf_stub_select
+  install_tmux_stub
+  install_login_shell "$FIXHOME"
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  mk_session "$FIXHOME/.claude" "$BATS_TEST_TMPDIR/proj" S1 "termx"
+  run_ccfind -i -t termx
+  assert_contains "$output" "CLAUDE argv=[--resume S1]"
+  run_ccfind -i -t termx
+  assert_equal "$status" 0
+  assert_contains "$output" "TMUX attached to [cc-proj-S1]"
+  refute_contains "$output" "argv="
+}
+
+@test "tmux: Enter refuses a vanished directory before tmux is ever called" {
+  install_fzf_stub_select
+  install_tmux_stub
+  install_login_shell "$FIXHOME"
+  mk_session "$FIXHOME/.claude" "/vanished/dir" S1 "termx"
+  run_ccfind -i -t termx
+  assert_equal "$status" 1
+  assert_contains "$output" "no longer exists"
+  assert_equal "$(cat "$TMUX_LOG" 2>/dev/null)" ""
+}
+
+@test "tmux: the picker header says where Enter goes" {
+  install_fzf_stub
+  install_tmux_stub
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "termx"
+  run_ccfind -i -t termx
+  assert_contains "$(cat "$FZF_ARGV")" "Enter resume in tmux"
+  run_ccfind -i termx
+  refute_contains "$(cat "$FZF_ARGV")" "resume in tmux"
+}
+
+@test "tmux: a machine without tmux says so once and resumes plainly" {
+  mk_session "$FIXHOME/.claude" "/proj/a" s1 "termx one"
+  mk_session "$FIXHOME/.claude" "/proj/b" s2 "termx two"
+  local p; p="$(path_without_tmux)" || skip "tmux shares a dir with ccfind's own tools here"
+  run env PATH="$p" HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' \
+    _ "$CCFIND_ZSH" -N -t termx
+  assert_equal "$status" 0
+  assert_equal "$(grep -c 'tmux is not installed here' <<<"$output")" 1
+  assert_contains "$output" "cd /proj/a && claude --resume s1"
+  refute_contains "$output" "tmux new-session"
+}
+
+@test "tmux: a remote hit opens tmux on the HOST and resumes its seat there" {
+  install_ssh_stub_real_host
+  install_tmux_stub
+  install_login_shell "$REMOTE_HOME"
+  mkdir -p "$BATS_TEST_TMPDIR/srv/side"
+  mk_session "$REMOTE_HOME/.claude-personal" "$BATS_TEST_TMPDIR/srv/side" R2abcdef99 "termx"
+  run_ccfind -N -t -R -H nas termx
+  assert_equal "$status" 0
+  local rcmd; rcmd="$(remote_resume_cmd)"
+  assert_contains "$rcmd" "cd $BATS_TEST_TMPDIR/srv/side && exec"
+  run env HOME="$REMOTE_HOME" PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c "$rcmd"
+  assert_equal "$status" 0
+  assert_contains "$output" "TMUX new session [cc-side-R2abcdef] in [$BATS_TEST_TMPDIR/srv/side]"
+  assert_contains "$output" "CLAUDE argv=[--resume R2abcdef99]"
+  assert_contains "$output" "dir=[$REMOTE_HOME/.claude-personal]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "tmux: a remote hit on the host's default seat exports nothing inside tmux" {
+  # The default-seat test travels four shells deep here (ssh, the outer -ic,
+  # tmux's -c, the window's -ic), so it is pinned at that depth too.
+  install_ssh_stub_real_host
+  install_tmux_stub
+  install_login_shell "$REMOTE_HOME"
+  mkdir -p "$BATS_TEST_TMPDIR/srv/app"
+  mk_session "$REMOTE_HOME/.claude" "$BATS_TEST_TMPDIR/srv/app" R1 "termx"
+  run_ccfind -N -t -R -H nas termx
+  local rcmd; rcmd="$(remote_resume_cmd)"
+  run env HOME="$REMOTE_HOME" PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash -c "$rcmd"
+  assert_equal "$status" 0
+  assert_contains "$output" "CLAUDE argv=[--resume R1]"
+  assert_contains "$output" "dir=[<unset>]"
+  assert_contains "$output" "verdict=[RESUMED]"
+}
+
+@test "tmux: a host without tmux resumes plainly and says why" {
+  install_ssh_stub_real_host
+  install_login_shell "$REMOTE_HOME"
+  mkdir -p "$BATS_TEST_TMPDIR/srv/app"
+  mk_session "$REMOTE_HOME/.claude" "$BATS_TEST_TMPDIR/srv/app" R1 "termx"
+  local p; p="$(path_without_tmux)" || skip "tmux shares a dir with ccfind's own tools here"
+  run_ccfind -N -t -R -H nas termx
+  local rcmd; rcmd="$(remote_resume_cmd)"
+  run env HOME="$REMOTE_HOME" PATH="$p" bash -c "$rcmd"
+  assert_equal "$status" 0
+  assert_contains "$output" "no tmux on this host, resuming without it"
+  assert_contains "$output" "CLAUDE argv=[--resume R1]"
+  refute_contains "$output" "CLAUDE-BARE"
+}
+
+@test "tmux: Enter on a remote hit sends exactly the line the list prints" {
+  install_fzf_stub_select
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  run_ccfind -N -t -R -H nas termx
+  local printed; printed="$(remote_resume_cmd)"
+  assert_contains "$printed" "tmux"
+  run_ccfind -i -t -R -H nas termx
+  assert_equal "$status" 0
+  local sent; sent="$(tail -1 "$SSH_LOG")"
+  assert_equal "${sent#-t nas }" "$printed"
+}
+
+@test "tmux: inside tmux, a remote hit resumes over plain ssh" {
+  install_ssh_stub_real_host
+  mk_session "$REMOTE_HOME/.claude" "/srv/app" R1 "termx"
+  export TMUX="/private/sock,123,0"
+  run_ccfind -N -t -R -H nas termx
+  assert_equal "$status" 0
+  assert_contains "$output" "ssh -t nas"
+  refute_contains "$output" "tmux"
+}
+
+@test "tmux: CCFIND_REMOTE_RESUME still wins for remote hits" {
+  install_ssh_stub
+  export CCFIND_REMOTE_RESUME="my-resume" CCFIND_TMUX=1
+  run_ccfind -H fakehost -N anything
+  assert_equal "$status" 0
+  assert_contains "$output" "my-resume fakehost /remote/proj RID123"
+  refute_contains "$output" "tmux"
+}

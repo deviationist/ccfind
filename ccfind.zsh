@@ -451,6 +451,8 @@ function _ccfind_tab_shift() {
 #   ccfind -S <text...>         smart-case: sensitive only if <text> has a capital
 #   ccfind [-d <dir>]           no query → list the most recent sessions
 #   ccfind -N <text...>         force the flat-list output (skip the picker)
+#   ccfind -t <text...>         resume inside a tmux session (-T: in this
+#                               terminal; CCFIND_TMUX=1 makes -t the default)
 #   ccfind -r <text...>         also search the configured remote hosts
 #   ccfindr <text...>           alias for `ccfind -r` (defined in ~/.zshrc)
 #   ccfind -l <text...>         force local only (trumps -r / -H)
@@ -490,6 +492,10 @@ function _ccfind_tab_shift() {
 # Tab/Shift-Tab cycle All → local → <host>, shown as a bar in the header
 # (needs fzf ≥ 0.45; silently ignored below that).
 #
+# tmux (-t, or CCFIND_TMUX=1 as the default): the resume opens in a tmux session
+# named after the hit, attached again if its claude is still running; remote
+# hits get that tmux on the host. Skipped when already inside tmux ($TMUX).
+#
 # In the picker: ↑/↓ navigates, Enter cds to the session's recorded cwd
 # (when different from $PWD) and runs `claude --resume <id>`, → opens a
 # preview of the session's last user+assistant messages (← / Esc-the-preview
@@ -502,7 +508,7 @@ function ccfind() {
   local scope="" exact=0
   local interactive="${CCFIND_INTERACTIVE:-1}" interactive_forced=0
   local hosts_override="" local_only=0 remote=0 remote_only=0 prof_filter="" color_override=""
-  local emit="" verbose=0 case_override=""
+  local emit="" verbose=0 case_override="" tmux_override=""
   # Every colour slot _ccfind_colors fills. Declared local here (it assigns into
   # its caller's scope) so no SGR variable ever leaks into the interactive shell.
   local _CCF_OFF _CCF_DIM _CCF_TS _CCF_PROF _CCF_HOST _CCF_SNIP _CCF_HIT \
@@ -528,17 +534,22 @@ function ccfind() {
       -s|--case-sensitive) case_override=sensitive; shift ;;
       -I|--ignore-case) case_override=insensitive; shift ;;
       -S|--smart-case) case_override=smart; shift ;;
+      -t|--tmux) tmux_override=1; shift ;;
+      -T|--no-tmux) tmux_override=0; shift ;;
       -C|--no-color|--no-colour) color_override=never; shift ;;
       -j|--json) emit=json; shift ;;
       --tsv) emit=tsv; shift ;;
       -v|--verbose) verbose=1; shift ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-r|-R|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
+        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-t|-T] [-r|-R|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
         echo "  -d <dir> scopes to that dir AND everything below it; -x/--exact narrows to"
         echo "  that one dir only (no subdirectories), and defaults the dir to \$PWD"
         echo "  matching is case-insensitive by default: -s/--case-sensitive forces case to"
         echo "  matter, -I/--ignore-case forces it not to, -S/--smart-case makes it matter"
         echo "  only when the query itself has a capital (CCFIND_CASE sets the default)"
+        echo "  -t/--tmux resumes inside a tmux session (reattached if it is still running),"
+        echo "  -T/--no-tmux in the current terminal (CCFIND_TMUX=1 makes -t the default);"
+        echo "  already inside tmux, the session resumes in the current pane either way"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  -r/-H ADD the hosts to the local search; -R/--remote-only searches the hosts"
@@ -565,11 +576,11 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}" _cfg_tmux="${CCFIND_TMUX-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" || -z "$_cfg_tmux" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE="" CCFIND_TMUX=""
       source "$_envf"
       [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
       [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
@@ -579,8 +590,24 @@ function ccfind() {
       [[ -z "$_cfg_profile_path" ]]  && _cfg_profile_path="$CCFIND_PROFILE_PATH"
       [[ -z "$_cfg_time" ]]          && _cfg_time="$CCFIND_TIME"
       [[ -z "$_cfg_case" ]]          && _cfg_case="$CCFIND_CASE"
+      [[ -z "$_cfg_tmux" ]]          && _cfg_tmux="$CCFIND_TMUX"
     fi
   fi
+
+  # ---- tmux. Resume a hit inside a tmux session instead of in this terminal:
+  # -t turns it on for the call, -T off, and CCFIND_TMUX=1 makes it the default.
+  # Already inside tmux ($TMUX set), it is skipped whichever of them asked: this
+  # pane already IS a tmux session, and nesting another one inside it buys only
+  # a prefix key that no longer reaches the inner one. That holds for remote hits
+  # too: the ssh resume would attach the host's tmux inside this one. A typo
+  # falls back to off, but says so, like CCFIND_CASE and CCFIND_TIME.
+  local use_tmux=0
+  case "${tmux_override:-${_cfg_tmux:-0}}" in
+    1|on|yes|true) use_tmux=1 ;;
+    0|off|no|false) ;;
+    *) print -u2 -r -- "${_CCF_WARN}ccfind: CCFIND_TMUX=${_cfg_tmux} is not one of 1|0 — not using tmux${_CCF_OFF}" ;;
+  esac
+  [[ -n "${TMUX:-}" ]] && use_tmux=0
 
   # ---- Case matching. The flags are the loudest voice, then CCFIND_CASE, then
   # the historical default: fold case. `smart` cannot be resolved yet — it reads
@@ -977,7 +1004,7 @@ if [ "$csens" = 1 ]; then gi=""; cmode=sensitive; else gi="-i"; cmode=insensitiv
 # searching the CALLER's profile directories under its own name.
 unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
       CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD \
-      CCFIND_CASE
+      CCFIND_CASE CCFIND_TMUX
 
 # Try EVERY candidate, not just the first one that exists. A host can easily
 # carry more than one clone — one left where the tool used to live, one where it
@@ -1290,6 +1317,57 @@ RSEOF
 
   [[ -n "$emit" ]] && { _ccfind_emit; return 0 }
 
+  # ---- tmux resume ----------------------------------------------------------
+  # A tmux session is named after the Claude session it runs, never picked
+  # fresh, so Enter on the same hit again finds it still open and attaches
+  # (`new-session -A`) instead of starting a second claude on one transcript.
+  # The cwd's last component keeps `tmux ls` readable and the id prefix keeps it
+  # unique. tmux will not take `.` or `:` in a name, so everything outside
+  # [A-Za-z0-9_-] becomes `-`.
+  local _tname
+  _ccfind_tmux_name() {   # <cwd> <id> → $_tname
+    local _b="${1:t}"
+    [[ -z "$_b" || "$1" == "?" ]] && _b=claude
+    _tname="cc-${${_b//[^A-Za-z0-9_-]/-}[1,24]}-${2[1,8]}"
+  }
+
+  # Whether a LOCAL hit goes into tmux: the mode is on and this machine has
+  # tmux. Asked lazily, when a local hit is about to be resumed or printed, so a
+  # -R search (which never resumes here) does not warn that tmux is missing.
+  # Missing tmux degrades to the plain resume, which still works, and says so once.
+  local _tmux_here=""
+  _ccfind_tmux_here() {
+    if [[ -z "$_tmux_here" ]]; then
+      _tmux_here=0
+      if (( use_tmux )); then
+        if command -v tmux >/dev/null 2>&1; then _tmux_here=1
+        else print -u2 -r -- "${_CCF_WARN}ccfind: tmux is not installed here — resuming without it${_CCF_OFF}"; fi
+      fi
+    fi
+    (( _tmux_here ))
+  }
+
+  # _ccfind_tmux_line <cwd> <id> <cfgdir> → $_tline, the line that opens the
+  # hit's tmux session, or reattaches to it while it is still running. One
+  # string for both paths: the flat list prints it, the picker evals it, so what
+  # you can copy is exactly what Enter runs.
+  #
+  # The window runs claude through an interactive shell ($SHELL -ic), not bare:
+  # `claude` is often a function or alias from the rc (a profile wrapper), which
+  # the `sh -c` tmux starts a window with never sees. When claude exits, that
+  # shell exits and the tmux session closes with it, so a session by this name
+  # always holds a running claude. The seat rule is _ccfind_pin_cfgdir's.
+  local _tline
+  _ccfind_tmux_line() {
+    _ccfind_tmux_name "$1" "$2"
+    local _inner="claude --resume $2"
+    _ccfind_pin_cfgdir "$3" && _inner="CLAUDE_CONFIG_DIR=${(q)3} $_inner"
+    local _run="exec ${(q)${SHELL:-/bin/sh}} -ic ${(qq)_inner}"
+    _tline="tmux new-session -A -s ${(q)_tname}"
+    [[ -n "$1" && "$1" != "?" ]] && _tline+=" -c ${(q)1}"
+    _tline+=" ${(qqq)_run}"
+  }
+
   # Remote resume command: cd on the host, then exec an interactive shell for
   # the claude invocation — non-interactive ssh PATH usually lacks claude, and
   # the interactive rc also loads any `claude` wrapper where present.
@@ -1307,6 +1385,18 @@ RSEOF
     local _inner="claude --resume $2"
     [[ -n "${3:-}" && -n "${4:-}" ]] && \
       _inner="[ ${(q)4} = \"\$HOME/.claude\" ] || export CLAUDE_CONFIG_DIR=${(q)4}; $_inner"
+    # In tmux mode, the tmux session lives on the HOST, which is what makes it
+    # worth having there: a dropped link takes the ssh with it, not the claude
+    # inside, and the next Enter on the same hit reattaches to it (same name,
+    # `new-session -A`). Its window runs the resume through "$SHELL" -ic for the
+    # reason the line below does. A host without tmux resumes plainly and says
+    # so, rather than failing a resume that would otherwise have worked.
+    if (( use_tmux )); then
+      _ccfind_tmux_name "$1" "$2"
+      local _run="exec \"\$SHELL\" -ic ${(qq)_inner}" _t="tmux new-session -A -s ${(q)_tname}"
+      [[ -n "$1" && "$1" != "?" ]] && _t+=" -c ${(q)1}"
+      _inner="if command -v tmux >/dev/null 2>&1; then exec $_t ${(qqq)_run}; else echo 'ccfind: no tmux on this host, resuming without it' >&2; $_inner; fi"
+    fi
     if [[ -n "$1" && "$1" != "?" ]]; then
       _rcmd="cd ${(q)1} && exec \"\$SHELL\" -ic ${(q)_inner}"
     else
@@ -1323,7 +1413,9 @@ RSEOF
   if (( interactive )) && command -v fzf >/dev/null 2>&1 \
      && { (( interactive_forced )) || [[ -t 0 && -t 1 ]] }; then
     local _k="$_CCF_KEY" _o="$_CCF_OFF"
-    local header="${_k}↑/↓${_o} navigate · ${_k}Enter${_o} resume · ${_k}→${_o} preview · ${_k}←${_o} hide · ${_k}Esc${_o} cancel"
+    local _enter="resume"
+    (( use_tmux )) && _enter="resume in tmux"
+    local header="${_k}↑/↓${_o} navigate · ${_k}Enter${_o} $_enter · ${_k}→${_o} preview · ${_k}←${_o} hide · ${_k}Esc${_o} cancel"
     if (( truncated )); then
       header="$header   ${_CCF_DIM}(showing $max of $total; raise with -n <max> or \$CCFIND_MAX)${_o}"
     fi
@@ -1442,7 +1534,7 @@ RSEOF
         done
         printf '%s\n' "${views[@]}" >"$tabsdir/views"
         print -r -- 1 >"$tabsdir/cur"
-        local tabhelp="${_k}Tab/⇧Tab${_o} views · ${_k}Enter${_o} resume · ${_k}→${_o} preview · ${_k}Esc${_o}"
+        local tabhelp="${_k}Tab/⇧Tab${_o} views · ${_k}Enter${_o} $_enter · ${_k}→${_o} preview · ${_k}Esc${_o}"
         (( truncated )) && tabhelp="$tabhelp  ${_CCF_DIM}(showing $max of $total)${_o}"
         print -r -- "$tabhelp" >"$tabsdir/help"
         header="$(_ccfind_tab_header "$tabsdir")"
@@ -1481,11 +1573,18 @@ RSEOF
       fi
       return $?
     fi
+    if [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" && ! -d "$_cwd" ]]; then
+      echo "ccfind: session cwd no longer exists: $_cwd" >&2
+      return 1
+    fi
+    # In tmux the session gets its directory from -c, so this shell stays where
+    # it was: you detach back to the prompt you left, not to a cd you never typed.
+    if _ccfind_tmux_here; then
+      _ccfind_tmux_line "$_cwd" "$_id" "$_cfgdir"
+      eval "$_tline"
+      return $?
+    fi
     if [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
-      if [[ ! -d "$_cwd" ]]; then
-        echo "ccfind: session cwd no longer exists: $_cwd" >&2
-        return 1
-      fi
       cd "$_cwd" || { echo "ccfind: cd to $_cwd failed" >&2; return 1; }
     fi
     # The row carries its own config dir, so the seat comes off the hit rather
@@ -1525,7 +1624,10 @@ RSEOF
       fi
       local _pfx=""
       _ccfind_pin_cfgdir "$_cfgdir" && _pfx="CLAUDE_CONFIG_DIR=${(q)_cfgdir} "
-      if [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
+      if _ccfind_tmux_here; then
+        _ccfind_tmux_line "$_cwd" "$_id" "$_cfgdir"
+        resume="$_tline"
+      elif [[ -n "$_cwd" && "$_cwd" != "?" && "$_cwd" != "$PWD" ]]; then
         resume="cd ${(q)_cwd} && ${_pfx}claude --resume $_id"
       else
         resume="${_pfx}claude --resume $_id"

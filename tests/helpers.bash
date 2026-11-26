@@ -27,7 +27,11 @@ ccfind_setup() {
   mk_global_config "$FIXHOME/.claude.json"
 
   export CCFIND_INTERACTIVE=0     # always the flat list — deterministic, no TTY
-  unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX
+  unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_TMUX
+  # Run from inside tmux, the suite would inherit $TMUX, and ccfind skips its
+  # tmux launch whenever that is set — so every tmux test would quietly take
+  # the plain path. The tests that want "already inside tmux" set it themselves.
+  unset TMUX
   # Anything running these tests from inside a Claude Code session (or any
   # profile-switching wrapper) has CLAUDE_CONFIG_DIR exported; it would be
   # inherited by an executed resume line and mask what ccfind actually emits.
@@ -222,9 +226,12 @@ install_ssh_stub_bare_host() {
 # line and assert where it would actually have landed, rather than only
 # string-matching the line. (Mirrors the receiving-end wrapper in
 # claude-profile, which honors a caller-set CLAUDE_CONFIG_DIR verbatim.)
+# <dir> defaults to the fake bin, i.e. on PATH; install_login_shell puts it
+# somewhere that is NOT, so only the rc's `claude` function can reach it.
 install_claude_stub() {
-  _stub_claim "$BATS_TEST_TMPDIR/bin/claude" || return 1
-  cat > "$BATS_TEST_TMPDIR/bin/claude" <<'STUB'
+  local bindir="${1:-$BATS_TEST_TMPDIR/bin}"
+  _stub_claim "$bindir/claude" || return 1
+  cat > "$bindir/claude" <<'STUB'
 #!/usr/bin/env bash
 # Where Claude Code looks for its GLOBAL config, as observed in the field:
 # $CLAUDE_CONFIG_DIR/.claude.json when that variable is set, $HOME/.claude.json
@@ -243,7 +250,103 @@ else
 fi
 echo "CLAUDE argv=[$*] dir=[${CLAUDE_CONFIG_DIR-<unset>}] pwd=[$PWD] config=[$cfg] verdict=[$verdict]"
 STUB
+  chmod +x "$bindir/claude"
+}
+
+# install_login_shell <home...> — the user's login shell in miniature, made
+# $SHELL: `-ic` reads ~/.shrc first and `-c` does not, the one property of a
+# real shell the tmux launch depends on. Each <home> gets a ~/.shrc defining
+# `claude` as a FUNCTION around the claude stub, which lives off PATH. That is
+# the shape of the operator's own machine (`claude` is a zsh function from the
+# rc, wrapping a binary that is also on PATH). The PATH copy here is a tripwire
+# standing for that bare binary: a launch that skips the interactive shell
+# reaches it, reports CLAUDE-BARE and fails — and the developer's REAL claude,
+# which would otherwise be next on PATH, is never run by the suite.
+install_login_shell() {
+  _stub_claim "$BATS_TEST_TMPDIR/bin/loginsh" || return 1
+  _stub_claim "$BATS_TEST_TMPDIR/bin/claude" || return 1
+  install_claude_stub "$BATS_TEST_TMPDIR/rc-bin" || return 1
+  cat > "$BATS_TEST_TMPDIR/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "CLAUDE-BARE argv=[$*]: reached off PATH, the rc's claude wrapper was skipped"
+exit 97
+STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+  cat > "$BATS_TEST_TMPDIR/bin/loginsh" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  -ic) [ -r "$HOME/.shrc" ] && . "$HOME/.shrc"; eval "$2" ;;
+  -c)  eval "$2" ;;
+  *)   echo "loginsh: unexpected args: $*" >&2; exit 2 ;;
+esac
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/loginsh"
+  local h
+  for h in "$@"; do
+    mkdir -p "$h"
+    printf 'claude() { %q "$@"; }\n' "$BATS_TEST_TMPDIR/rc-bin/claude" > "$h/.shrc"
+  done
+  export SHELL="$BATS_TEST_TMPDIR/bin/loginsh"
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
+}
+
+# install_tmux_stub — shadow `tmux` with a model of the one command ccfind
+# sends it, `new-session -A -s <name> [-c <dir>] <shell-command>`, keeping the
+# behaviour the feature leans on:
+#   - the window runs `$SHELL -c <shell-command>` in <dir> (tmux's default-shell
+#     is $SHELL), so the rc is NOT read there;
+#   - -A on a name that is still running attaches to it instead of starting a
+#     second claude on the same transcript.
+# $TMUX_STATE lists the sessions that are running. Real tmux drops a session
+# when its claude exits; the model keeps it, standing for a claude still going,
+# which is the case the reattach rule is about. Every call is logged to
+# $TMUX_LOG, one argv per line, each arg in [brackets] so word splits show.
+install_tmux_stub() {
+  _stub_claim "$BATS_TEST_TMPDIR/bin/tmux" || return 1
+  export TMUX_LOG="$BATS_TEST_TMPDIR/tmux-log" TMUX_STATE="$BATS_TEST_TMPDIR/tmux-state"
+  : > "$TMUX_STATE"
+  cat > "$BATS_TEST_TMPDIR/bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'tmux'; printf ' [%s]' "$@"; printf '\n'; } >> "$TMUX_LOG"
+[ "$1" = new-session ] || { echo "tmux stub: unexpected command: $1" >&2; exit 2; }
+shift
+attach=0 name="" dir="$PWD"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -A) attach=1 ;;
+    -s) name="$2"; shift ;;
+    -c) dir="$2"; shift ;;
+    -*) echo "tmux stub: unexpected option: $1" >&2; exit 2 ;;
+    *)  break ;;
+  esac
+  shift
+done
+[ $# -eq 1 ] || { echo "tmux stub: want one shell-command, got $#" >&2; exit 2; }
+case "$name" in *[.:]*) echo "tmux stub: bad session name: $name" >&2; exit 1 ;; esac
+if [ -n "$name" ] && grep -qxF -- "$name" "$TMUX_STATE"; then
+  [ "$attach" = 1 ] && { echo "TMUX attached to [$name]"; exit 0; }
+  echo "duplicate session: $name" >&2; exit 1
+fi
+printf '%s\n' "$name" >> "$TMUX_STATE"
+echo "TMUX new session [$name] in [$dir]"
+cd "$dir" || exit 1
+exec "${SHELL:-/bin/sh}" -c "$1"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
+  _stub_path_add "$BATS_TEST_TMPDIR/bin"
+}
+
+# path_without_tmux — $PATH minus every dir that holds a tmux, for the tests
+# about a machine that has none. Fails, so the caller can skip, when those dirs
+# also hold what ccfind itself needs (on Linux, tmux sits in /usr/bin beside
+# grep and awk, and no PATH can keep the one and lose the other).
+path_without_tmux() {
+  local d out="" t IFS=:
+  for d in $PATH; do [ -x "$d/tmux" ] || out="${out:+$out:}$d"; done
+  for t in zsh bash grep sed awk sort head stat mktemp; do
+    PATH="$out" command -v "$t" >/dev/null 2>&1 || return 1
+  done
+  printf '%s' "$out"
 }
 
 # resume_line_from_output — the resume command ccfind printed for the first hit.

@@ -65,7 +65,7 @@ cp "$root/ccfind.zsh" "$ccfind_zsh"
 export HOME="$fakehome"
 export USER=demo
 unset CLAUDE_CONFIG_DIR CCFIND_MAX CCFIND_TABS CCFIND_HOSTS CCFIND_PROFILES \
-      CCFIND_REMOTE_RESUME CCFIND_INTERACTIVE NO_COLOR
+      CCFIND_REMOTE_RESUME CCFIND_INTERACTIVE CCFIND_TMUX NO_COLOR
 
 # seed <config-dir> <cwd> <id> <age-seconds> <jsonl-body...>
 # Writes a transcript where Claude Code would, then backdates it: ccfind orders
