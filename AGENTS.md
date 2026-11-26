@@ -15,6 +15,8 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   -x           exact scope: that dir ONLY, no subdirs (dir defaults to $PWD)
   -s | -I | -S case-sensitive / force-insensitive / smart-case (= CCFIND_CASE)
   -t | -T      resume inside tmux / in this terminal (= CCFIND_TMUX)
+  --resume <id>  resume that session, no search (checks it is not running)
+  -f           with --resume / Enter: start it even though it is running
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
@@ -34,8 +36,8 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   absent, output is piped, `-N`, or `CCFIND_INTERACTIVE=0`.
 - **Multi-host (`-r`/`-H`):** a self-contained POSIX worker runs over `ssh <host>
   sh -s` — nothing installed remotely, only per-hit metadata returns. Remote hits
-  merge newest-first with a host column; resume becomes `ssh -t <host> 'cd <cwd> &&
-  exec "$SHELL" -ic claude --resume <id>'`. Host precedence: `-H` > env `CCFIND_HOSTS`
+  merge newest-first with a host column; resume asks the host's own ccfind (see
+  *Remote resume* below). Host precedence: `-H` > env `CCFIND_HOSTS`
   > `.env`. Unreachable host = one stderr line, rest still show.
 - **Which machines (`-r`/`-H` widen, `-R`/`-l` exclude):** `-r`/`-H` ADD hosts to the
   local search; the local walk is otherwise unconditional. `-R`/`--remote-only` takes
@@ -91,18 +93,36 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   `--json` carries the resolved boolean (`case_sensitive`) beside the mode it came
   from (`case_mode`); `_ccfind_hl`'s 4th arg and `CCFIND_PV_CASE` keep the list and
   preview highlights marking exactly what the grep matched.
-- **tmux resume (`-t` / `CCFIND_TMUX=1`; `-T` off):** the resume becomes
+- **Resume = `ccfind --resume <id>`** (`_ccfind_resume_local`; Enter calls it):
+  never starts a second claude on a running session. **Running check**
+  (`_ccfind_running`): Claude Code's `<cfgdir>/sessions/<pid>.json` (compact JSON)
+  whose `sessionId` matches, the pid alive (`kill -0`), `procStart` equal to the
+  process's start (`TZ=UTC ps -o lstart` on macOS; `/proc/<pid>/stat` field 22 on
+  Linux) and `pidDomain` equal to this machine's (`darwin`; `linux:<machine-id>:
+  <pid ns>`); formats read off live records 2026-11-26. Each check has a test with
+  a negative control (dead pid, reused pid, foreign domain, no procStart). Running
+  in a tmux pane (`_ccfind_find_pane`: claude or an ancestor is a `pane_pid`, on
+  EVERY socket in `$TMUX_TMPDIR/tmux-<uid>/`, e.g. the `-L claude-rc` server; dead
+  sockets skipped) → `[Y/n]` attach, or switch-client inside that same server;
+  nested (inside tmux, other server, or `--from-tmux`) → refuse + the attach
+  command. Running outside tmux → refuse, `-f/--force` overrides. **tmux is never
+  assumed:** no tmux → nothing to find, "outside tmux".
+- **tmux resume (`-t` / `CCFIND_TMUX=1`; `-T` off) of a session NOT running:**
   `tmux new-session -A -s cc-<cwd basename>-<id[1,8]> -c <cwd> "exec $SHELL -ic
-  '<claude --resume …>'"` (`_ccfind_tmux_line`). The name is derived from the hit,
-  never fresh, so a second Enter while that claude runs ATTACHES rather than
-  starting a second claude on one transcript; the session closes when claude
-  exits. `$SHELL -ic`, not bare: `claude` is often an rc function (tmux starts a
-  window with `sh -c`, which never sees it). The caller's shell is not `cd`'d.
-  ONE string: the flat list prints it, the picker `eval`s it. **`$TMUX` set →
-  skipped entirely** (local and remote: no tmux in tmux). Remote hits get tmux
-  ON THE HOST (survives a dropped link), with a plain-resume fallback when the
-  host has none; `CCFIND_REMOTE_RESUME` still wins. No local tmux → one stderr
-  warning, plain resume (`_ccfind_tmux_here`, lazy so `-R` never warns).
+  '<claude --resume …>'"` (`_ccfind_tmux_line`); inside tmux, `has-session ||
+  new-session -d` then `switch-client` (never nested). `$SHELL -ic`, not bare:
+  `claude` is often an rc function (tmux starts a window with `sh -c`). The
+  caller's shell is not `cd`'d. No tmux → one stderr warning, plain resume
+  (`_ccfind_tmux_here`, lazy so `-R` never warns).
+- **Remote resume: the host decides** (`_ccfind_remote_cmd`). `ssh -t <host> 'cd
+  <cwd> && exec "$SHELL" -ic "if ccfind --capabilities | grep -qx resume; then
+  ccfind --resume <id> --as <host> --cfgdir … --cwd … [--from-tmux] [-t|-T]
+  [-f]; else <the old plain/tmux resume>; fi"'`: the host checks its own
+  processes and applies its own `CCFIND_TMUX`; `--from-tmux` because `$TMUX`
+  is not sent over ssh. One connection; a host without a capable ccfind gets the
+  old command. The flat list prints that same ssh line; for LOCAL hits it prints
+  the plain (or tmux) line, unchecked, since a printed list can ask nothing.
+  `CCFIND_REMOTE_RESUME` still wins over all of it.
 - **Session title:** the name `claude --resume` shows, read from the transcript's own
   title records — last `custom-title` (`/rename`) beats last `ai-title` (generated,
   rewritten as the session grows) beats legacy `summary`. One awk program
@@ -137,7 +157,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_HOSTS` | unset | ssh aliases for `-r`/`ccfindr` (env or `.env`) |
 | `CCFIND_REMOTE_RESUME` | unset | override remote resume: called `<cmd> <host> <cwd> <id>` (wrap in tmux/screen) |
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
-| `CCFIND_TMUX` | 0 | `1` → resume inside tmux by default (`-t`/`-T` override; skipped inside tmux) |
+| `CCFIND_TMUX` | 0 | `1` → sessions living on THIS machine resume inside tmux by default (`-t`/`-T` override; never nested; tmux optional) |
 | `CCFIND_CASE` | insensitive | case matching: `insensitive` / `sensitive` / `smart` (`-s`/`-I`/`-S` override) |
 | `CCFIND_TIME` | both | time column: `both` (mtime + age) / `abs` (mtime) / `rel` (age) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |

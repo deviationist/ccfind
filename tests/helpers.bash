@@ -32,6 +32,14 @@ ccfind_setup() {
   # tmux launch whenever that is set — so every tmux test would quietly take
   # the plain path. The tests that want "already inside tmux" set it themselves.
   unset TMUX
+  # tmux keeps each server's socket in $TMUX_TMPDIR/tmux-<uid>/, and ccfind asks
+  # every socket there whether a session runs in one of its panes. Pointing it
+  # at a per-test dir means the suite can never see, let alone attach to, the
+  # developer's real tmux servers, whatever tmux is on PATH.
+  export TMUX_TMPDIR="$BATS_TEST_TMPDIR/tmuxtmp"
+  mkdir -p "$TMUX_TMPDIR/tmux-$UID"
+  export TMUX_PANES="$BATS_TEST_TMPDIR/tmux-panes"
+  : > "$TMUX_PANES"
   # Anything running these tests from inside a Claude Code session (or any
   # profile-switching wrapper) has CLAUDE_CONFIG_DIR exported; it would be
   # inherited by an executed resume line and mask what ccfind actually emits.
@@ -50,6 +58,10 @@ ccfind_teardown() {
     *) printf 'isolation breach: FIXHOME=%s is outside %s\n' "$FIXHOME" "$BATS_TEST_TMPDIR" >&2
        return 1 ;;
   esac
+  # The stand-in claudes mk_running left running.
+  if [ -s "$BATS_TEST_TMPDIR/bg-pids" ]; then
+    xargs kill 2>/dev/null < "$BATS_TEST_TMPDIR/bg-pids" || true
+  fi
   rm -rf "$BATS_TEST_TMPDIR/bin"
 }
 
@@ -119,8 +131,17 @@ age_session() {
 
 # run_ccfind <ccfind-args...> — run ccfind in an isolated zsh with the fixture
 # HOME. Exported CCFIND_* vars set by the test propagate into the subprocess.
+# stdin is closed: a question ccfind asks gets "nobody to ask" instead of
+# waiting on the developer's terminal. run_ccfind_answer feeds it an answer.
 run_ccfind() {
-  run env HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' _ "$CCFIND_ZSH" "$@"
+  run env HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' _ "$CCFIND_ZSH" "$@" </dev/null
+}
+
+# run_ccfind_answer <answer> <ccfind-args...> — the same, with <answer> typed
+# at whatever ccfind asks.
+run_ccfind_answer() {
+  local ans="$1"; shift
+  run env HOME="$FIXHOME" zsh -fc 'src=$1; shift; source "$src"; ccfind "$@"' _ "$CCFIND_ZSH" "$@" <<<"$ans"
 }
 
 # run_ccfind_in <dir> <ccfind-args...> — same, but from inside <dir>, for the
@@ -128,7 +149,7 @@ run_ccfind() {
 run_ccfind_in() {
   local dir="$1"; shift
   run env HOME="$FIXHOME" zsh -fc 'cd -- "$1" || exit 1; src=$2; shift 2; source "$src"; ccfind "$@"' \
-    _ "$dir" "$CCFIND_ZSH" "$@"
+    _ "$dir" "$CCFIND_ZSH" "$@" </dev/null
 }
 
 # _stub_claim <path> — claim a name on the fake PATH, refusing to overwrite a
@@ -272,12 +293,14 @@ echo "CLAUDE-BARE argv=[$*]: reached off PATH, the rc's claude wrapper was skipp
 exit 97
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+  # zsh, as on the operator's machines: that is what lets a host's ~/.shrc
+  # load ccfind (a zsh function), the way index.zsh does on a real server.
   cat > "$BATS_TEST_TMPDIR/bin/loginsh" <<'STUB'
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 case "$1" in
-  -ic) [ -r "$HOME/.shrc" ] && . "$HOME/.shrc"; eval "$2" ;;
+  -ic) [[ -r "$HOME/.shrc" ]] && source "$HOME/.shrc"; eval "$2" ;;
   -c)  eval "$2" ;;
-  *)   echo "loginsh: unexpected args: $*" >&2; exit 2 ;;
+  *)   print -u2 -r -- "loginsh: unexpected args: $*"; exit 2 ;;
 esac
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/loginsh"
@@ -290,13 +313,19 @@ STUB
   _stub_path_add "$BATS_TEST_TMPDIR/bin"
 }
 
-# install_tmux_stub — shadow `tmux` with a model of the one command ccfind
-# sends it, `new-session -A -s <name> [-c <dir>] <shell-command>`, keeping the
-# behaviour the feature leans on:
-#   - the window runs `$SHELL -c <shell-command>` in <dir> (tmux's default-shell
-#     is $SHELL), so the rc is NOT read there;
-#   - -A on a name that is still running attaches to it instead of starting a
-#     second claude on the same transcript.
+# install_tmux_stub — shadow `tmux` with a model of the commands ccfind sends,
+# keeping the behaviour the feature leans on:
+#   - `-S <path>` / `-L <name>` pick the server; with neither, the server is the
+#     one $TMUX names, else `default` in $TMUX_TMPDIR/tmux-<uid>/ (as tmux does);
+#   - new-session runs its window as `$SHELL -c <shell-command>` in its -c dir
+#     (tmux's default-shell is $SHELL), so the rc is NOT read there; -A on a
+#     name that is still running attaches instead of starting a second claude;
+#     -d starts it without attaching (run here in the foreground, to observe);
+#   - list-panes -a answers from $TMUX_PANES (socket, pane pid, session, window,
+#     pane per line). A socket with no panes answers like a socket file whose
+#     server has exited: "no server running", status 1;
+#   - has-session / switch-client / attach-session / select-window /
+#     select-pane do what their names say, observably.
 # $TMUX_STATE lists the sessions that are running. Real tmux drops a session
 # when its claude exits; the model keeps it, standing for a claude still going,
 # which is the case the reattach rule is about. Every call is logged to
@@ -308,12 +337,35 @@ install_tmux_stub() {
   cat > "$BATS_TEST_TMPDIR/bin/tmux" <<'STUB'
 #!/usr/bin/env bash
 { printf 'tmux'; printf ' [%s]' "$@"; printf '\n'; } >> "$TMUX_LOG"
-[ "$1" = new-session ] || { echo "tmux stub: unexpected command: $1" >&2; exit 2; }
-shift
+sockdir="${TMUX_TMPDIR:-/tmp}/tmux-$UID"
+if [ -n "$TMUX" ]; then sock="${TMUX%%,*}"; else sock="$sockdir/default"; fi
+while :; do
+  case "$1" in
+    -S) sock="$2"; shift 2 ;;
+    -L) sock="$sockdir/$2"; shift 2 ;;
+    *)  break ;;
+  esac
+done
+cmd="$1"; shift
+target() { while [ $# -gt 0 ]; do [ "$1" = -t ] && { printf '%s' "$2"; return; }; shift; done; }
+case "$cmd" in
+  list-panes)
+    out="$(awk -F'\t' -v s="$sock" '$1 == s { print $2 "\t" $3 "\t" $4 "\t" $5 }' "$TMUX_PANES")"
+    [ -n "$out" ] || { echo "no server running on $sock" >&2; exit 1; }
+    printf '%s\n' "$out"; exit 0 ;;
+  has-session)
+    t="$(target "$@")"; grep -qxF -- "${t#=}" "$TMUX_STATE"; exit $? ;;
+  switch-client)   echo "TMUX switched to [$(target "$@")] on [$sock]"; exit 0 ;;
+  attach-session|attach) echo "TMUX attached to [$(target "$@")] on [$sock]"; exit 0 ;;
+  select-window|select-pane) exit 0 ;;
+  new-session) ;;
+  *) echo "tmux stub: unexpected command: $cmd" >&2; exit 2 ;;
+esac
 attach=0 name="" dir="$PWD"
 while [ $# -gt 0 ]; do
   case "$1" in
     -A) attach=1 ;;
+    -d) ;;
     -s) name="$2"; shift ;;
     -c) dir="$2"; shift ;;
     -*) echo "tmux stub: unexpected option: $1" >&2; exit 2 ;;
@@ -330,7 +382,7 @@ fi
 printf '%s\n' "$name" >> "$TMUX_STATE"
 echo "TMUX new session [$name] in [$dir]"
 cd "$dir" || exit 1
-exec "${SHELL:-/bin/sh}" -c "$1"
+"${SHELL:-/bin/sh}" -c "$1"
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
   _stub_path_add "$BATS_TEST_TMPDIR/bin"
@@ -347,6 +399,69 @@ path_without_tmux() {
     PATH="$out" command -v "$t" >/dev/null 2>&1 || return 1
   done
   printf '%s' "$out"
+}
+
+# mk_session_record <cfgdir> <pid> <id> <procStart> <pidDomain> — the record
+# Claude Code keeps for a running session, as it writes it: one line of
+# compact JSON, no trailing newline, at <cfgdir>/sessions/<pid>.json. Only the
+# fields ccfind reads plus a few neighbours; the real one carries ~20.
+mk_session_record() {
+  mkdir -p "$1/sessions"
+  printf '{"pid":%s,"sessionId":"%s","cwd":"/somewhere","startedAt":1795649729270,"procStart":"%s","version":"2.1.332","kind":"interactive","entrypoint":"cli","pidDomain":"%s","status":"idle"}' \
+    "$2" "$3" "$4" "$5" > "$1/sessions/$2.json"
+}
+
+# this_proc_start <pid> / this_pid_domain — procStart and pidDomain the way
+# Claude Code computes them on this platform, as read off live records on
+# 2026-11-26: on macOS the UTC `ps -o lstart` of the process and "darwin"; on
+# Linux field 22 of /proc/<pid>/stat and "linux:<machine-id>:<pid namespace>".
+this_proc_start() {
+  case "$(uname -s)" in
+    Darwin) TZ=UTC ps -o lstart= -p "$1" | sed 's/^ *//;s/ *$//' ;;
+    *)      sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20 ;;
+  esac
+}
+this_pid_domain() {
+  case "$(uname -s)" in
+    Darwin) printf darwin ;;
+    *)      printf 'linux:%s:%s' "$(cat /etc/machine-id 2>/dev/null)" "$(readlink /proc/self/ns/pid)" ;;
+  esac
+}
+
+# mk_running <cfgdir> <id> [<socket> <tmux-session> [<window> <pane>]] — a
+# claude that is running right now: a real process (sleep) under a bash that
+# stays its parent, the way a tmux pane's process parents the real claude, plus
+# the record Claude Code keeps for it. With a socket, that parent is registered
+# as a pane of that tmux server. Sets RUN_PID (the "claude") and RUN_PANE_PID;
+# teardown kills both.
+mk_running() {
+  local cfg="$1" id="$2" sock="${3:-}" sess="${4:-}" win="${5:-0}" pane="${6:-0}"
+  local pf="$BATS_TEST_TMPDIR/run-$id.pid" i
+  bash -c 'sleep 600 & echo $! > "$1"; wait' _ "$pf" </dev/null >/dev/null 2>&1 3>&- &
+  RUN_PANE_PID=$!
+  for i in $(seq 100); do [ -s "$pf" ] && break; sleep 0.05; done
+  RUN_PID="$(cat "$pf")"
+  printf '%s\n%s\n' "$RUN_PID" "$RUN_PANE_PID" >> "$BATS_TEST_TMPDIR/bg-pids"
+  mk_session_record "$cfg" "$RUN_PID" "$id" "$(this_proc_start "$RUN_PID")" "$(this_pid_domain)"
+  if [ -n "$sock" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$sock" "$RUN_PANE_PID" "$sess" "$win" "$pane" >> "$TMUX_PANES"
+  fi
+}
+
+# tmux_sock <name> — the path of tmux server <name>'s socket for this test
+# (`default` is the plain `tmux` one), created as a file the way tmux leaves
+# one behind, so a socket whose server is gone is modelled by simply giving
+# it no panes.
+tmux_sock() {
+  local p="$TMUX_TMPDIR/tmux-$UID/$1"
+  : > "$p"
+  printf '%s' "$p"
+}
+
+# login_shell_loads_ccfind <home> <ccfind.zsh> — that home's interactive shell
+# also loads ccfind, as index.zsh does on a real server.
+login_shell_loads_ccfind() {
+  printf 'source %q\n' "$2" >> "$1/.shrc"
 }
 
 # resume_line_from_output — the resume command ccfind printed for the first hit.
