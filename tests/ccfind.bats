@@ -2804,3 +2804,138 @@ print(len(d), d[0]["id"], d[0]["host"], d[0]["running"]["pid"])' <<<"$output"
   assert_contains "$output" "nas:rwork:/srv/idle"
   refute_contains "$output" "/srv/new"
 }
+
+# --- Remote Control server sessions ("anchors") are hidden ---------------------
+# `claude remote-control` pre-creates one session for itself, not meant to be
+# talked to. It is recognised while it runs: its record's bridgeSessionId is
+# the claude.ai session named in a "standalone" bridge-pointer.json. Hidden by
+# default everywhere; -a, or CCFIND_HIDE_RC=0, lists it. The fixture anchors
+# here carry content on purpose: the rule must not be "empty transcript".
+
+# mk_anchor <cfgdir> <cwd> <id> — a running Remote Control server session.
+mk_anchor() {
+  mk_session "$1" "$2" "$3" "termx anchor"
+  mk_bridge_pointer "$1" "${2//[^a-zA-Z0-9]/-}" "session_ANCHOR_$3"
+  RUN_BRIDGE="session_ANCHOR_$3" mk_running "$1" "$3"
+}
+
+@test "rc: a Remote Control server's own session is hidden by default" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx real"
+  run_ccfind -N termx
+  assert_equal "$status" 0
+  assert_contains "$output" "/proj/b"
+  refute_contains "$output" "A1"
+}
+
+@test "rc: -a lists it, labelled, with its running marker" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  run_ccfind -N -a termx
+  assert_contains "$output" "Remote Control server"
+  assert_contains "$output" "● running (pid $RUN_PID"
+}
+
+@test "rc: CCFIND_HIDE_RC=0 lists them for good, from the env or the .env" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  export CCFIND_HIDE_RC=0
+  run_ccfind -N termx
+  assert_contains "$output" "Remote Control server"
+  unset CCFIND_HIDE_RC
+  printf 'typeset CCFIND_HIDE_RC=0\n' > "${CCFIND_ZSH%/*}/.env"
+  run_ccfind -N termx
+  assert_contains "$output" "Remote Control server"
+}
+
+@test "rc: an unknown CCFIND_HIDE_RC warns and keeps hiding" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  export CCFIND_HIDE_RC=maybe
+  run_ccfind -N termx
+  assert_contains "$output" "CCFIND_HIDE_RC=maybe is not one of 1|0"
+  refute_contains "$output" "Remote Control server"
+}
+
+@test "rc: a session started from claude.ai (its own claude.ai session) stays visible" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  mk_session "$FIXHOME/.claude" "/code" C1 "termx from claude.ai"
+  RUN_BRIDGE="session_SOMETHING_ELSE" mk_running "$FIXHOME/.claude" C1
+  run_ccfind -N termx
+  assert_contains "$output" "termx from claude.ai"
+  refute_contains "$output" "termx anchor"
+}
+
+@test "rc: negative control: a pointer that is not a server's (source != standalone) hides nothing" {
+  mk_session "$FIXHOME/.claude" "/code" A1 "termx anchor"
+  mk_bridge_pointer "$FIXHOME/.claude" "-code" "session_ANCHOR_A1" repl
+  RUN_BRIDGE="session_ANCHOR_A1" mk_running "$FIXHOME/.claude" A1
+  run_ccfind -N termx
+  assert_contains "$output" "termx anchor"
+}
+
+@test "rc: negative control: once it stops running it is no longer recognised" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  kill "$RUN_PID" "$RUN_PANE_PID"; wait "$RUN_PANE_PID" 2>/dev/null || true
+  run_ccfind -N termx
+  assert_contains "$output" "termx anchor"
+}
+
+@test "rc: hidden before the cap, so it never takes a slot" {
+  mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx real"
+  export CCFIND_NOW=1800000000
+  age_session "$FIXHOME/.claude" "/proj/b" S2 600
+  mk_anchor "$FIXHOME/.claude" "/code" A1      # newest
+  run_ccfind -N -n 1 termx
+  assert_contains "$output" "/proj/b"
+}
+
+@test "rc: --running leaves it out unless -a" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  run_ccfind -N --running termx
+  assert_contains "$output" "No matching sessions."
+  run_ccfind -N --running -a termx
+  assert_contains "$output" "Remote Control server"
+}
+
+@test "rc: -v says how many it hid" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  run_ccfind -N -v termx
+  assert_contains "$output" "hid 1 Remote Control server session(s) here (-a shows them)"
+}
+
+@test "rc: --json marks it with -a" {
+  mk_anchor "$FIXHOME/.claude" "/code" A1
+  mk_session "$FIXHOME/.claude" "/proj/b" S2 "termx real"
+  run_ccfind --json -a termx
+  run python3 -c '
+import json, sys
+r = {x["id"]: x["remote_control_server"] for x in json.load(sys.stdin)["results"]}
+print(r["A1"], r["S2"])' <<<"$output"
+  assert_equal "$output" "True False"
+}
+
+@test "rc: a host hides its own, and -a from the caller shows it, labelled" {
+  install_ssh_stub_real_host
+  mk_anchor "$REMOTE_HOME/.claude" "/srv/code" A1
+  mk_session "$REMOTE_HOME/.claude" "/srv/b" S2 "termx real"
+  run_ccfind -N -R -H nas termx
+  assert_contains "$output" "nas:rwork:/srv/b"
+  refute_contains "$output" "termx anchor"
+  run_ccfind -R -H nas -a --json termx
+  run python3 -c '
+import json, sys
+r = {x["id"]: (x["title"], x["remote_control_server"]) for x in json.load(sys.stdin)["results"]}
+print(r["A1"])' <<<"$output"
+  assert_equal "$output" "('Remote Control server', True)"
+}
+
+@test "rc: the caller decides for every host in the search" {
+  # The host's own .env says list them; the caller hides them, so they stay
+  # hidden. And a caller that lists them lists the host's too.
+  install_ssh_stub_real_host
+  printf 'typeset CCFIND_HIDE_RC=0\n' >> "$REMOTE_CCFIND_DIR/.env"
+  mk_anchor "$REMOTE_HOME/.claude" "/srv/code" A1
+  run_ccfind -N -R -H nas termx
+  refute_contains "$output" "termx anchor"
+  export CCFIND_HIDE_RC=0
+  run_ccfind -N -R -H nas termx
+  assert_contains "$output" "Remote Control server"
+}

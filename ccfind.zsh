@@ -526,6 +526,10 @@ function ccfind() {
   # found the session hands the machine it lives on; a person needs none of them.
   local resume_id="" resume_cfgdir="" resume_cwd="" resume_as="" from_tmux=0 resume_force=0
   local running_only=0
+  # -a/--all: also list Remote Control server sessions (see anchors below).
+  # Resolved after the config is read: -a, else what the caller said over ssh
+  # (CCFIND_SHOW_ALL), else this machine's CCFIND_HIDE_RC (default 1 = hide).
+  local show_all=0 show_all_flag=0
   # A real tab for building run_info keys: zsh does NOT expand $'\t' inside an
   # associative-array subscript, so a key spelled with it would hold the six
   # characters $'\t' instead (it still "works" until anything splits the key).
@@ -564,6 +568,7 @@ function ccfind() {
       --from-tmux) from_tmux=1; shift ;;
       -f|--force) resume_force=1; shift ;;
       --running) running_only=1; shift ;;
+      -a|--all) show_all_flag=1; shift ;;
       # Asked by another machine before it hands this one a --resume: a ccfind
       # too old to know the option rejects this one too, exits non-zero, and the
       # caller falls back to the resume command it always used.
@@ -588,6 +593,7 @@ function ccfind() {
         echo "  ccfind offers to attach to its tmux pane, or refuses; -f/--force starts it anyway"
         echo "  markers: green ● = running right now, yellow ● (○ without colour) = active in the"
         echo "  last CCFIND_RECENT minutes (default 15; 0 = off). --running lists only running sessions"
+        echo "  the session a \`claude remote-control\` server keeps for itself is hidden; -a/--all shows it"
         echo "  remote search is opt-in: -r (or the ccfindr alias) uses CCFIND_HOSTS"
         echo "  (env or the .env beside ccfind.zsh); -H <hosts> searches an explicit list; -l forces local"
         echo "  -r/-H ADD the hosts to the local search; -R/--remote-only searches the hosts"
@@ -614,11 +620,11 @@ function ccfind() {
   # ---- Config. Exported env wins over the repo's .env (ccfind-only, so it is
   # safe to source on every call). Keys read: CCFIND_PROFILES/HOSTS/TABS; they
   # are pre-declared local before sourcing so nothing leaks to the shell.
-  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}" _cfg_tmux="${CCFIND_TMUX-}" _cfg_recent="${CCFIND_RECENT-}"
-  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" || -z "$_cfg_tmux" || -z "$_cfg_recent" ]]; then
+  local _cfg_profiles="${CCFIND_PROFILES-}" _cfg_hosts="${CCFIND_HOSTS-}" _cfg_tabs="${CCFIND_TABS-}" _cfg_remote_resume="${CCFIND_REMOTE_RESUME-}" _cfg_remote_path="${CCFIND_REMOTE_PATH-}" _cfg_profile_path="${CCFIND_PROFILE_PATH-}" _cfg_time="${CCFIND_TIME-}" _cfg_case="${CCFIND_CASE-}" _cfg_tmux="${CCFIND_TMUX-}" _cfg_recent="${CCFIND_RECENT-}" _cfg_hide_rc="${CCFIND_HIDE_RC-}"
+  if [[ -z "$_cfg_profiles" || -z "$_cfg_hosts" || -z "$_cfg_tabs" || -z "$_cfg_remote_resume" || -z "$_cfg_remote_path" || -z "$_cfg_profile_path" || -z "$_cfg_time" || -z "$_cfg_case" || -z "$_cfg_tmux" || -z "$_cfg_recent" || -z "$_cfg_hide_rc" ]]; then
     local _envf="${_CCFIND_SOURCE:h}/.env"
     if [[ -r "$_envf" ]]; then
-      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE="" CCFIND_TMUX="" CCFIND_RECENT=""
+      typeset CCFIND_PROFILES="" CCFIND_HOSTS="" CCFIND_TABS="" CCFIND_REMOTE_RESUME="" CCFIND_REMOTE_PATH="" CCFIND_PROFILE_PATH="" CCFIND_TIME="" CCFIND_CASE="" CCFIND_TMUX="" CCFIND_RECENT="" CCFIND_HIDE_RC=""
       source "$_envf"
       [[ -z "$_cfg_profiles" ]]      && _cfg_profiles="$CCFIND_PROFILES"
       [[ -z "$_cfg_hosts" ]]         && _cfg_hosts="$CCFIND_HOSTS"
@@ -630,6 +636,7 @@ function ccfind() {
       [[ -z "$_cfg_case" ]]          && _cfg_case="$CCFIND_CASE"
       [[ -z "$_cfg_tmux" ]]          && _cfg_tmux="$CCFIND_TMUX"
       [[ -z "$_cfg_recent" ]]        && _cfg_recent="$CCFIND_RECENT"
+      [[ -z "$_cfg_hide_rc" ]]       && _cfg_hide_rc="$CCFIND_HIDE_RC"
     fi
   fi
 
@@ -673,6 +680,19 @@ function ccfind() {
   fi
   # One clock reading for the whole run, so every age on screen is measured
   # from the same instant and a long listing cannot straddle a minute boundary.
+  # ---- Remote Control server sessions: hidden unless asked. -a wins; then the
+  # caller's choice when this machine is being searched over ssh (it sends
+  # CCFIND_SHOW_ALL=0|1, so a fan-out applies ONE rule on every host, as with
+  # CCFIND_CASE); then this machine's CCFIND_HIDE_RC (1, the default, hides;
+  # 0 lists them). A typo keeps the default, and says so.
+  case "${_cfg_hide_rc:-1}" in
+    1|on|yes|true)  show_all=0 ;;
+    0|off|no|false) show_all=1 ;;
+    *) print -u2 -r -- "${_CCF_WARN}ccfind: CCFIND_HIDE_RC=${_cfg_hide_rc} is not one of 1|0 — hiding them${_CCF_OFF}" ;;
+  esac
+  case "${CCFIND_SHOW_ALL-}" in 1) show_all=1 ;; 0) show_all=0 ;; esac
+  (( show_all_flag )) && show_all=1
+
   # ---- Recent activity: a hit whose transcript changed within the last
   # CCFIND_RECENT minutes (default 15) gets the yellow marker, unless it is
   # running (green wins). 0 turns it off; a typo falls back to 15, and says so.
@@ -814,6 +834,9 @@ function ccfind() {
         for _k in "${(@k)run_info}"; do
           [[ "$_k" == local$'\t'* ]] && print -r -- "#running"$'\t'"${_k#local$'\t'}"$'\t'"${run_info[$_k]}"
         done
+        (( show_all )) && for _k in "${(@k)anchor}"; do
+          [[ "$_k" == local$'\t'* ]] && print -r -- "#anchor"$'\t'"${_k#local$'\t'}"
+        done
       fi
       return 0
     fi
@@ -860,6 +883,7 @@ function ccfind() {
       else
         print -rn -- ', "running": null'
       fi
+      print -rn -- ', "remote_control_server": '"$( [[ -n "${anchor[$_host$_T$_id]+x}" ]] && print -n true || print -n false )"
       print -rn -- '}'
     done
     (( _first )) || print
@@ -1108,12 +1132,14 @@ function ccfind() {
   # session running on this machine now (and is that id's, when one is given),
   # with _run_id/_run_pid/_run_tty set. The record is trusted only as far as
   # the process behind it checks out (see above).
-  local _run_id _mydom=""
+  local _run_id _run_bridge _mydom=""
   _ccfind_record() {
-    _run_id="" _run_pid="" _run_tty=""
+    _run_id="" _run_pid="" _run_tty="" _run_bridge=""
     local _j _p _ps _dom
     [[ -z "$_mydom" ]] && _mydom="$(_ccfind_proc_domain)"
     _j="$(<"$1")" 2>/dev/null || return 1
+    # The claude.ai session a Remote Control session is bridged to, if any.
+    [[ "$_j" =~ '"bridgeSessionId"[[:space:]]*:[[:space:]]*"([^"]*)"' ]] && _run_bridge="${match[1]}"
     if [[ -n "${2:-}" ]]; then
       [[ "$2" =~ '^[A-Za-z0-9_-]+$' ]] || return 1  # an id is safe to put in a regex
       [[ "$_j" =~ '"sessionId"[[:space:]]*:[[:space:]]*"'"$2"'"' ]] || return 1
@@ -1207,15 +1233,46 @@ function ccfind() {
   # now: this machine's from _ccfind_scan_running, a remote host's from the
   # `#running` lines its own ccfind sends back. A snapshot for display only;
   # resuming re-checks.
+  # ---- Remote Control server sessions ("anchors") ---------------------------
+  # `claude remote-control` pre-creates one session in its directory when it
+  # starts (--create-session-in-dir, on by default), so claude.ai/code has
+  # somewhere to land; `--name` titles it there, and only there. It is not
+  # meant to be talked to, and its transcript stays empty, so it is hidden
+  # from every listing unless -a/--all. Claude Code links it to its server
+  # through two of its own files, neither documented:
+  #   <cfgdir>/projects/<dir>/bridge-pointer.json  {"sessionId": the claude.ai
+  #       session of the server's own session, "source": "standalone", ...}
+  #   <cfgdir>/sessions/<pid>.json  the running session, whose
+  #       "bridgeSessionId" is that same claude.ai session
+  # Only "standalone" pointers count, so a session that merely switched Remote
+  # Control on (/remote-control) is never mistaken for a server's. Only a
+  # RUNNING anchor can be recognised: its record goes when it exits. Should
+  # Claude Code change these files, nothing matches and nothing is hidden.
+  # Read off a live server on 2026-11-26 (Claude Code 2.1.330).
+  # anchor["<host><TAB><id>"]=1 for each one found, here or reported by a host.
+  local -A anchor
+  local -i hidden_rc=0
+  _ccfind_anchor_ptrs() {   # <cfgdir> → _ptrs[<claude.ai session id>]=1
+    local _p _j
+    for _p in "$1"/projects/*/bridge-pointer.json(N); do
+      _j="$(<"$_p")" 2>/dev/null || continue
+      [[ "$_j" =~ '"source"[[:space:]]*:[[:space:]]*"standalone"' ]] || continue
+      [[ "$_j" =~ '"sessionId"[[:space:]]*:[[:space:]]*"([^"]+)"' ]] && _ptrs[${match[1]}]=1
+    done
+  }
+
   local -A run_info
   _ccfind_scan_running() {   # every running session in every local profile
     local _d _f
-    local -A _done
+    local -A _done _ptrs
     for _d in "${(@v)prof_cfgdir}"; do
       [[ -n "${_done[$_d]+x}" ]] && continue
       _done[$_d]=1
+      _ptrs=()
+      _ccfind_anchor_ptrs "$_d"
       for _f in "$_d"/sessions/*.json(N); do
         _ccfind_record "$_f" || continue
+        [[ -n "$_run_bridge" && -n "${_ptrs[$_run_bridge]+x}" ]] && anchor[local$_T$_run_id]=1
         [[ -n "${run_info[local$_T$_run_id]+x}" ]] && continue
         local _st=term _sf=""
         if _ccfind_find_pane "$_run_pid"; then
@@ -1486,6 +1543,7 @@ function ccfind() {
 #       $6=1 for a case-sensitive match, 0 to fold (already resolved by the
 #       caller, so `smart` is decided once for the whole fan-out)
 #       $7=1 for --running (only sessions running there now)
+#       $8=1 for -a (also list Remote Control server sessions)
 #
 # Emits one header line, then records:
 #   #ccfind mode=<remote|fallback> [reason=<why>]
@@ -1495,6 +1553,7 @@ function ccfind() {
 # per session, after the records (asked for with CCFIND_STATUS=1, which an
 # older ccfind ignores, so it simply sends none):
 #   #running<TAB>id<TAB>tmux|term<TAB>pid<TAB>tty<TAB>socket flag<TAB>tmux session<TAB>window<TAB>pane
+#   #anchor<TAB>id      (a Remote Control server session, sent only when -a showed it)
 #
 # Two ways to produce those records, tried in that order, in ONE connection —
 # a separate capability probe would double the ssh cost of every host in a
@@ -1514,7 +1573,7 @@ function ccfind() {
 # `zsh -f` skips the rc entirely (fast, and no surprises from someone's
 # prompt), and sourcing the file still auto-loads the .env beside it — which
 # is where that host's CCFIND_PROFILES lives.
-q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"; csens="$6"; running="${7:-0}"
+q="$1"; max="${2:-10}"; enc="$3"; dpath="$4"; exact="$5"; csens="$6"; running="${7:-0}"; showall="${8:-0}"
 root="$HOME/.claude/projects"
 # grep's fold flag, as a word that is empty when unwanted — this is POSIX sh,
 # so there are no arrays; the unquoted expansions below are deliberate.
@@ -1527,7 +1586,7 @@ if [ "$csens" = 1 ]; then gi=""; cmode=sensitive; else gi="-i"; cmode=insensitiv
 # searching the CALLER's profile directories under its own name.
 unset CCFIND_PROFILES CCFIND_HOSTS CCFIND_TABS CCFIND_MAX CCFIND_INTERACTIVE \
       CCFIND_COLOR CCFIND_REMOTE_RESUME CCFIND_PROFILE_PATH CCFIND_PROFILE_CMD \
-      CCFIND_CASE CCFIND_TMUX CCFIND_STATUS CCFIND_RECENT
+      CCFIND_CASE CCFIND_TMUX CCFIND_STATUS CCFIND_RECENT CCFIND_SHOW_ALL CCFIND_HIDE_RC
 
 # Try EVERY candidate, not just the first one that exists. A host can easily
 # carry more than one clone — one left where the tool used to live, one where it
@@ -1570,7 +1629,9 @@ if command -v zsh >/dev/null 2>&1; then
     # ccfind predating it rejects it and the host drops to the walk below,
     # whose hits carry no running status and so are filtered out by the caller.
     [ "$running" = 1 ] && set -- "$@" --running
-    out=$(CCFIND_CASE="$cmode" CCFIND_STATUS=1 zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
+    # -a travels as CCFIND_SHOW_ALL, which an older ccfind ignores (and it
+    # hides nothing anyway), instead of a flag it would reject.
+    out=$(CCFIND_CASE="$cmode" CCFIND_STATUS=1 CCFIND_SHOW_ALL="$showall" zsh -fc 'source "$1"; shift; ccfind "$@"' _ "$c" "$@" -- "$q" 2>/dev/null)
     # Exit status alone decides, NOT whether anything came back: a search that
     # legitimately matched nothing is a successful remote search, and testing
     # for output would demote it to a fallback — a pointless second walk of the
@@ -1639,7 +1700,7 @@ RSEOF
     for h in "${remote_hosts[@]}"; do
       (
         command ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$h" \
-          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact} ${(q)csens} ${(q)running_only}" \
+          "CCFIND_REMOTE_PATH=${(q)_cfg_remote_path} sh -s -- ${(q)query} ${(q)max} ${(q)enc} ${(q)abs} ${(q)exact} ${(q)csens} ${(q)running_only} ${(q)show_all}" \
           <<<"$_rscript" >"$rtmpdir/${h//\//_}.tsv" 2>/dev/null
         echo $? >"$rtmpdir/${h//\//_}.rc"
       ) &
@@ -1736,6 +1797,16 @@ RSEOF
     # newest first; ls -t with an explicit list works on GNU and BSD alike
     pfiles=("${(@f)$(ls -t -- $phits 2>/dev/null)}")
     pfiles=(${pfiles:#})
+    # Remote Control server sessions are hidden before the cap, so they never
+    # take a slot from a session you would actually resume.
+    if (( ! show_all && ${#anchor} )); then
+      local -a _vis=()
+      for _f in "${pfiles[@]}"; do
+        if [[ -n "${anchor[local$_T${_f:t:r}]+x}" ]]; then (( hidden_rc++ ))
+        else _vis+=("$_f"); fi
+      done
+      pfiles=("${_vis[@]}")
+    fi
     if (( running_only )); then                  # a transcript is <session-id>.jsonl
       local -a _keep=()
       for _f in "${pfiles[@]}"; do
@@ -1746,9 +1817,13 @@ RSEOF
     (( local_count += ${#pfiles} ))
     for _f in "${pfiles[@]:0:$max}"; do
       _ccfind_extract "$_f"
+      # Shown under -a: say what it is, since it has no title of its own here.
+      [[ -z "$_title" && -n "${anchor[local$_T$_id]+x}" ]] && _title="Remote Control server"
       records+=("$(_epochfn "$_f")"$'\t'local$'\t'"$_pfxlabel"$'\t'"${prof_cfgdir[$_plabel]}"$'\t'"$_id"$'\t'"${_cwd:-?}"$'\t'"$_ts"$'\t'"${_snippet//$'\t'/ }"$'\t'"$_f"$'\t'"$_title")
     done
   done
+
+  (( verbose && hidden_rc )) && print -u2 -r -- "${_CCF_DIM}ccfind: hid ${hidden_rc} Remote Control server session(s) here (-a shows them)${_CCF_OFF}"
 
   # A -d scope that matched no project dir in any profile (and no remote host).
   if [[ -n "$enc" ]] && (( _projdir_total == 0 && ${#remote_hosts} == 0 )); then
@@ -1795,6 +1870,11 @@ RSEOF
         fi
         # A session running on that host, as its own ccfind saw it (sent only
         # because we asked: see CCFIND_STATUS in the worker).
+        if [[ "$line" == '#anchor'$'\t'* ]]; then
+          _rid="${line#*$'\t'}"
+          anchor[$h$_T$_rid]=1
+          continue
+        fi
         if [[ "$line" == '#running'$'\t'* ]]; then
           _rr="${line#*$'\t'}"
           _rid="${_rr%%$'\t'*}"

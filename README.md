@@ -46,6 +46,7 @@ ccfind -t <text...>                # resume inside a tmux session (-T: in this t
 ccfind --resume <id>               # resume that session, checking it is not already running
 ccfind -f --resume <id>            # start it even though it is running
 ccfind --running [-r] [text...]    # only the sessions running right now (green ●)
+ccfind -a <text...>                # also list Remote Control server sessions (hidden by default)
 ccfind -n <max> <text...>          # cap the number of hits shown (default 10)
 ccfind -N <text...>                # force the flat-list output (opt out of the picker)
 ccfind -i <text...>                # force the picker on (overrides CCFIND_INTERACTIVE=0 + the TTY check)
@@ -113,6 +114,28 @@ ccfind -n 50 deploy              # show up to 50 hits (same as CCFIND_MAX=50)
 ccfind -N deploy                 # flat-list output, copy/paste the resume command
 ccfind deploy | less             # auto-flat-list (no TTY on stdout)
 ```
+
+## Remote Control server sessions are hidden
+
+`claude remote-control` pre-creates one session for itself when it starts
+(`--create-session-in-dir`, on by default) so that claude.ai/code has somewhere
+to land; `--name` titles it there. It is not meant to be talked to, and on a
+machine that runs a Remote Control server it would otherwise sit near the top of
+every listing as an empty, folderless row. ccfind hides it everywhere: in the
+picker, the flat list, `--json`, `--running`, and in results from other hosts.
+Sessions you start from claude.ai/code through that server are ordinary sessions
+and stay listed.
+
+`-a` / `--all` lists it for one call, labelled **Remote Control server**;
+`CCFIND_HIDE_RC=0` (env or `.env`) lists it for good. In a search across hosts
+the machine you search from decides, for every host. `-v` says how many it hid.
+
+How it is recognised: while it runs, Claude Code's record of the session
+(`<config dir>/sessions/<pid>.json`) is bridged to the claude.ai session named in
+the server's `bridge-pointer.json` (`source: standalone`) in the project dir it
+serves. Both files are Claude Code internals, so this is best effort: a server
+session that is no longer running cannot be told apart, and should the format
+change, nothing is hidden rather than the wrong thing.
 
 ## Markers: running now and recent activity
 
@@ -670,6 +693,7 @@ local-only runs, or when `CCFIND_TABS` is unset.
 | `CCFIND_TABS` | *(unset)* | `1` → per-host tab views in the multi-host picker (fzf ≥ 0.45). |
 | `CCFIND_TIME` | `both` | Time column: `both` = mtime + age, `abs` = mtime only, `rel` = age only. |
 | `CCFIND_RECENT` | `15` | Minutes a session counts as recently active (yellow marker). `0` turns the marker off. |
+| `CCFIND_HIDE_RC` | `1` | Hide the session a `claude remote-control` server keeps for itself. `0` lists it; `-a` lists it for one call. |
 | `CCFIND_MAX` | `10` | Max hits printed / pickable. `-n <max>` overrides per-call. |
 | `CCFIND_INTERACTIVE` | `1` | `0` → default to the flat list instead of the fzf picker. |
 | `CCFIND_COLOR` | `auto` | `always` / `never` override the "colour only on a terminal" default. `NO_COLOR` and `-C` also force plain. |

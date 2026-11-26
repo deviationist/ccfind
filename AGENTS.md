@@ -18,6 +18,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   --resume <id>  resume that session, no search (checks it is not running)
   -f           with --resume / Enter: start it even though it is running
   --running    only sessions running right now (green ●), on every searched host
+  -a           also list Remote Control server sessions (= CCFIND_HIDE_RC=0)
   -n <max>     cap hits (default 10; = CCFIND_MAX)
   -N | -i      force flat-list / force picker (-i also overrides the TTY check)
   -C           no colour (= NO_COLOR=1 / CCFIND_COLOR=never)
@@ -68,6 +69,16 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   remote worker only), `--tsv` also sends `#running<TAB>id<TAB>tmux|term<TAB>pid<TAB>
   tty<TAB>sockflag<TAB>session<TAB>window<TAB>pane` lines after the records; a caller
   that predates them never asks, so never receives one.
+- **Remote Control server sessions hidden** (`anchor[...]`, `_ccfind_anchor_ptrs`):
+  a RUNNING session whose record's `bridgeSessionId` is the `sessionId` of a
+  `<cfgdir>/projects/*/bridge-pointer.json` with `"source":"standalone"` is the
+  session `claude remote-control` pre-creates for itself. Dropped before the `-n`
+  cap (`hidden_rc`, reported at `-v`), from every listing; `-a` / `CCFIND_HIDE_RC=0`
+  keep it, titled "Remote Control server" and `remote_control_server: true` in JSON.
+  Remote: the caller sends `CCFIND_SHOW_ALL=0|1` (worker arg 8) so ONE rule applies
+  to every host; hosts send `#anchor<TAB>id` lines when they show one. Undocumented
+  internals (Claude Code 2.1.330): a stopped anchor is not recognisable, and a
+  format change means nothing matches, never a wrong hide.
 - **Markers:** green ● = running now (`run_info["host<TAB>id"]`, from
   `_ccfind_scan_running` here and `#running` lines from hosts; same record checks as
   `--resume`), yellow ● = transcript mtime within `CCFIND_RECENT` minutes (default
@@ -173,6 +184,7 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_TABS` | unset | `1` → per-host tab views (fzf ≥ 0.45) |
 | `CCFIND_TMUX` | 0 | `1` → sessions living on THIS machine resume inside tmux by default (`-t`/`-T` override; never nested; tmux optional) |
 | `CCFIND_RECENT` | 15 | minutes a hit counts as recently active (yellow ●); `0` = off |
+| `CCFIND_HIDE_RC` | 1 | hide the session a `claude remote-control` server keeps for itself; `0` lists it |
 | `CCFIND_CASE` | insensitive | case matching: `insensitive` / `sensitive` / `smart` (`-s`/`-I`/`-S` override) |
 | `CCFIND_TIME` | both | time column: `both` (mtime + age) / `abs` (mtime) / `rel` (age) |
 | `CCFIND_MAX` | 10 | max hits printed/pickable |
