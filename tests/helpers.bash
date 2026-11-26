@@ -407,8 +407,22 @@ path_without_tmux() {
 # fields ccfind reads plus a few neighbours; the real one carries ~20.
 mk_session_record() {
   mkdir -p "$1/sessions"
-  printf '{"pid":%s,"sessionId":"%s","cwd":"/somewhere","startedAt":1795649729270,"procStart":"%s","version":"2.1.332","kind":"interactive","entrypoint":"cli","pidDomain":"%s","status":"idle"}' \
-    "$2" "$3" "$4" "$5" > "$1/sessions/$2.json"
+  # A 6th argument is the claude.ai session a Remote Control session is
+  # bridged to, carried as "bridgeSessionId" the way Claude Code writes it.
+  local bridge=""
+  [ -n "${6:-}" ] && bridge=",\"bridgeSessionId\":\"$6\""
+  printf '{"pid":%s,"sessionId":"%s","cwd":"/somewhere","startedAt":1795649729270,"procStart":"%s","version":"2.1.332","kind":"interactive","entrypoint":"cli","pidDomain":"%s","status":"idle"%s}' \
+    "$2" "$3" "$4" "$5" "$bridge" > "$1/sessions/$2.json"
+}
+
+# mk_bridge_pointer <cfgdir> <project dir name> <claude.ai session> [<source>]
+# — the pointer `claude remote-control` keeps in the project dir it serves, as
+# read off a live server (2026-11-26): the claude.ai session of the server's
+# own session, "source": "standalone", and the server's pid and dir.
+mk_bridge_pointer() {
+  mkdir -p "$1/projects/$2"
+  printf '{"sessionId":"%s","environmentId":"env_fixture","source":"%s","pid":1,"procStart":"1","dir":"/somewhere","machineId":"fixture"}' \
+    "$3" "${4:-standalone}" > "$1/projects/$2/bridge-pointer.json"
 }
 
 # this_proc_start <pid> / this_pid_domain — procStart and pidDomain the way
@@ -442,7 +456,8 @@ mk_running() {
   for i in $(seq 100); do [ -s "$pf" ] && break; sleep 0.05; done
   RUN_PID="$(cat "$pf")"
   printf '%s\n%s\n' "$RUN_PID" "$RUN_PANE_PID" >> "$BATS_TEST_TMPDIR/bg-pids"
-  mk_session_record "$cfg" "$RUN_PID" "$id" "$(this_proc_start "$RUN_PID")" "$(this_pid_domain)"
+  # RUN_BRIDGE=<claude.ai session> makes it a Remote Control session's record.
+  mk_session_record "$cfg" "$RUN_PID" "$id" "$(this_proc_start "$RUN_PID")" "$(this_pid_domain)" "${RUN_BRIDGE:-}"
   if [ -n "$sock" ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$sock" "$RUN_PANE_PID" "$sess" "$win" "$pane" >> "$TMUX_PANES"
   fi
