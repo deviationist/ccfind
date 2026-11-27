@@ -191,6 +191,8 @@ ccfind [text...]                   literal, case-insensitive; newest-first
 | `CCFIND_INTERACTIVE` | 1 | `0` → default to flat list |
 | `CCFIND_COLOR` | auto | `always` / `never`; auto = colour only on a terminal |
 | `CCFIND_REMOTE_PATH` | unset | where ccfind lives on remote hosts, if unconventional |
+| `CCFIND_PROFILE_PATH` | unset | where `claude-profile.py` lives, if unconventional (only when `CCFIND_PROFILES` is unset) |
+| `CCFIND_PROFILE_CMD` | unset | command asked for profiles instead of claude-profile (`<cmd> list`); env only |
 
 ## Conventions
 
@@ -217,3 +219,6 @@ ccfind [text...]                   literal, case-insensitive; newest-first
   false `[[ … ]]` mid-test does not fail a bats test (only a trailing one, or `[ … ]`). README
   images: `zsh tools/generate-readme-svg.zsh` — hermetic sandbox + stub `fzf`/`ssh`,
   runs the real tool with `CCFIND_COLOR=always`; commit the SVGs with the README.
+  It draws the picker field fzf's `--with-nth` names (read off the captured argv)
+  and aborts on a blank row: taking "the last field" blanked every picker image
+  when field 12 was appended. After a change to the row fields, open the images.

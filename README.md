@@ -10,7 +10,7 @@ session is a `.jsonl` transcript under
 `fzf` picker (the default) or prints the exact resume command for each hit.
 
 <div align="center">
-  <img src="assets/demo-21fa7b.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
+  <img src="assets/demo-de0ffc.svg" alt="ccfind running: a search across two local profiles and one remote host, the picker listing the hits newest first, the selection moving down a row, and the preview pane opening on a session that lives on another machine">
 </div>
 
 ## Install
@@ -71,7 +71,7 @@ and how long ago that was, which profile or host it belongs to, its working
 directory, and the matching text with the search term picked out.
 
 <div align="center">
-  <img src="assets/picker-21fa7b.svg" alt="the ccfind fzf picker: five matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
+  <img src="assets/picker-de0ffc.svg" alt="the ccfind fzf picker: six matching sessions, each row a timestamp and its age, the profile or host it belongs to, its working directory and the matching text with the search term highlighted">
 </div>
 
 | Key | Action |
@@ -90,7 +90,7 @@ before committing to one. On a remote hit the transcript is fetched over ssh on
 demand (once per session, then cached for as long as the picker is open):
 
 <div align="center">
-  <img src="assets/preview-21fa7b.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
+  <img src="assets/preview-de0ffc.svg" alt="the ccfind picker with the preview pane open, showing the last messages of the highlighted session with the search term highlighted in them">
 </div>
 
 ### Flat-list fallback
@@ -103,7 +103,7 @@ when `fzf` is absent, output is piped (no TTY), you pass `-N`/`--no-interactive`
 `CCFIND_INTERACTIVE=0` is set.
 
 <div align="center">
-  <img src="assets/list-21fa7b.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
+  <img src="assets/list-de0ffc.svg" alt="the ccfind flat list: each hit as a timestamp, its age and a profile-tagged directory, the matching snippet beneath it, and the exact resume command to copy">
 </div>
 
 ```zsh
@@ -460,11 +460,13 @@ alias ccfindr='ccfind -r'    # ccfind incl. the remote hosts
 - **Merged display.** Remote hits interleave with local ones newest-first. The
   picker gains a host column (`local` / `<host>`); the flat list prefixes the cwd
   with `<host>:`.
-- **Resuming a remote hit** runs
-  `ssh -t <host> 'cd <cwd> && exec "$SHELL" -ic claude\ --resume\ <id>'` — the
-  interactive shell is deliberate: non-interactive ssh PATH usually lacks `claude`,
-  and the interactive rc also loads any `claude`-wrapper you have. The flat list
-  prints that exact command, copy/paste-ready.
+- **Resuming a remote hit** runs `ssh -t <host> 'cd <cwd> && exec "$SHELL" -ic …'`,
+  which hands the resume to that host's own `ccfind --resume <id>`, or runs plain
+  `claude --resume <id>` when the host has no ccfind that knows `--resume` (see
+  [Resuming a session that is already running](#resuming-a-session-that-is-already-running)).
+  The interactive shell is deliberate: non-interactive ssh PATH usually lacks
+  `claude`, and only the interactive rc loads ccfind and any `claude`-wrapper you
+  have. The flat list prints that exact command, copy/paste-ready.
 - **Remote preview** (`→` in the picker) fetches the highlighted transcript over ssh
   once into a per-invocation cache, then reuses it while you toggle the preview.
 - **Per-call control:** `-r` opts in using the configured list; `-H "<hosts>"`
@@ -587,7 +589,8 @@ ccfind --json "connection refused" | jq -r '.results[] | "\(.host)\t\(.cwd)"'
       "cwd": "/srv/backup", "mtime": "2026-08-12 08:17:41",
       "snippet": "…", "path": "/home/you/.claude-media/projects/-srv-backup/e5710b93.jsonl",
       "running": {"in_tmux": true, "pid": 4123, "terminal": "pts/1",
-                  "tmux_server": "", "tmux_session": "work", "tmux_window": "2", "tmux_pane": "1"}
+                  "tmux_server": "", "tmux_session": "work", "tmux_window": "2", "tmux_pane": "1"},
+      "remote_control_server": false
     }
   ]
 }
@@ -605,6 +608,8 @@ what a consumer needs to resume it into the right seat. `title` is the name
 the generated title — and empty for a session too young to have one. `running` is
 `null` unless the session was running when the search ran; then it says where
 (`tmux_server` is `""` for the default tmux server, else `-L <name>` / `-S <path>`).
+`remote_control_server` is `true` only for the session a Remote Control server
+keeps for itself, which appears at all only under `-a` / `CCFIND_HIDE_RC=0`.
 The document is well-formed
 even when nothing matched (`"results": []`) — and JSON output never opens the picker
 and is never coloured, whatever else is set.
@@ -661,7 +666,7 @@ older than the global top-`max` still gets a full tab. Needs **fzf ≥ 0.45** (J
 local-only runs, or when `CCFIND_TABS` is unset.
 
 <div align="center">
-  <img src="assets/tabs-21fa7b.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
+  <img src="assets/tabs-de0ffc.svg" alt="the ccfind picker with CCFIND_TABS=1: a tab bar reading All, work, personal, nas, with All selected, above the merged list">
 </div>
 
 ## Notes
@@ -671,7 +676,8 @@ local-only runs, or when `CCFIND_TABS` is unset.
   file, so it pops back to the top.
 - Search is a **literal substring** (not regex), case-insensitive by default — see
   [Case matching](#case-matching) for `-s` / `-S` / `CCFIND_CASE`.
-- The encoded project-dir name is lossy (every `/` becomes `-`), so the displayed
+- The encoded project-dir name is lossy (every non-alphanumeric character becomes
+  `-`), so the displayed
   working directory is read from the `cwd` field *inside* each transcript (exact).
 - `CCFIND_MAX` caps how many results are printed / pickable (default 10; `-n <max>`
   overrides per-call). `CCFIND_INTERACTIVE` (default `1`) controls picker-vs-flat-list.
