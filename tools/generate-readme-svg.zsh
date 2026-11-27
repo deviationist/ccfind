@@ -235,10 +235,20 @@ fargs=("${(@f)$(<"$tmp/argv")}")
 trows=("${(@f)$(<"$tmp/tab-rows")}");   trows=(${trows:#})
 tfargs=("${(@f)$(<"$tmp/tab-argv")}")
 
-# Only field 7 — the display line ccfind composes — is ever drawn; the six data
-# fields behind it are what fzf hides.
-rows=("${(@)rows/*$'\t'/}")      # * is greedy: everything through the last tab
-trows=("${(@)trows/*$'\t'/}")
+# Only the field fzf is told to show — the display line ccfind composes — is
+# ever drawn; the data fields around it are what fzf hides. Its number is read
+# off the argv ccfind handed fzf (--with-nth=N), never assumed from its place:
+# a field appended after it (12, where a session runs) once made "the last
+# field" an empty one and blanked every row in the images.
+pick_shown() {   # <array-name> <argv-array-name>: keep only the --with-nth field
+  local -a _out _f; local _r _a _n=
+  for _a in "${(@P)2}"; do [[ $_a == --with-nth=<-> ]] && _n=${_a#--with-nth=}; done
+  [[ -n $_n ]] || { print -u2 "generate-readme-svg: no --with-nth=<n> in fzf's argv — aborting"; exit 1; }
+  for _r in "${(@P)1}"; do _f=("${(@ps:\t:)_r}"); _out+=("${_f[_n]}"); done
+  set -A $1 "${_out[@]}"
+}
+pick_shown rows fargs
+pick_shown trows tfargs
 rows=("${(@)rows//$fakehome/\~}")
 trows=("${(@)trows//$fakehome/\~}")
 rows=("${(@)rows//$rhome/\~}")
@@ -251,6 +261,9 @@ for a in "${tfargs[@]}"; do [[ $a == --header=* ]] && theader=${a#--header=}; do
 [[ -n $list_out && -n $pv_out && -n $pv_nas && ${#rows} -gt 0 && ${#trows} -gt 0 && -n $header ]] || {
   print -u2 "generate-readme-svg: sandbox produced no output — aborting"; exit 1
 }
+for _row in "${rows[@]}" "${trows[@]}"; do
+  [[ -n ${_row//[[:space:]]/} ]] || { print -u2 "generate-readme-svg: a picker row came out blank — aborting"; exit 1; }
+done
 print -u2 "captured ${#rows} picker rows, ${#trows} tab rows"
 
 # ---------------------------------------------------------------------------

@@ -578,7 +578,7 @@ function ccfind() {
       --tsv) emit=tsv; shift ;;
       -v|--verbose) verbose=1; shift ;;
       -h|--help)
-        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-t|-T] [-r|-R|-l] [-H <hosts>] [-p <profile>] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
+        echo "usage: ccfind [-d <dir>] [-x] [-n <max>] [-i|-N] [-s|-I|-S] [-t|-T] [-r|-R|-l] [-H <hosts>] [-p <profile>] [-a] [-C] [-v] [-j|--tsv] [<profile>] [text...]"
         echo "       ccfind [-H <host>] [-t|-T] [-f] --resume <session-id>"
         echo "       ccfind --running [-r|-H <hosts>] [text...]"
         echo "  -d <dir> scopes to that dir AND everything below it; -x/--exact narrows to"
